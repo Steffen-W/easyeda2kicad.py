@@ -30,6 +30,24 @@ from .kicad.export_kicad_symbol import ExporterSymbolKicad
 from .kicad.parameters_kicad_symbol import KicadVersion
 
 
+def parse_custom_fields(custom_field_args: list[str]) -> dict[str, str]:
+    custom_fields: dict[str, str] = {}
+    for custom_field in custom_field_args:
+        key, separator, value = custom_field.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if not separator:
+            raise ValueError(
+                f'Invalid custom field "{custom_field}". Expected KEY:VALUE.'
+            )
+        if not key:
+            raise ValueError(
+                f'Invalid custom field "{custom_field}". Key must not be empty.'
+            )
+        custom_fields[key] = value
+    return custom_fields
+
+
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -73,6 +91,14 @@ def get_parser() -> argparse.ArgumentParser:
         metavar="file.kicad_sym",
         help="Output file",
         type=str,
+    )
+    parser.add_argument(
+        "--custom-field",
+        dest="custom_field",
+        action="append",
+        default=[],
+        metavar="KEY:VALUE",
+        help="Add a custom symbol property. May be passed multiple times.",
     )
 
     parser.add_argument(
@@ -118,6 +144,12 @@ def valid_arguments(arguments: dict[str, Any]) -> bool:
             "  easyeda2kicad --lcsc_id=C2040 --footprint\n"
             "  easyeda2kicad --lcsc_id=C2040 --symbol"
         )
+        return False
+
+    try:
+        arguments["custom_fields"] = parse_custom_fields(arguments["custom_field"])
+    except ValueError as err:
+        logging.error(str(err))
         return False
 
     kicad_version = KicadVersion.v6
@@ -241,7 +273,9 @@ def _process_symbol(
 
     footprint_lib_name = arguments["output"].split("/")[-1].split(".")[0]
     kicad_symbol_lib = ExporterSymbolKicad(
-        symbol=easyeda_symbol, kicad_version=kicad_version
+        symbol=easyeda_symbol,
+        kicad_version=kicad_version,
+        custom_fields=arguments["custom_fields"],
     ).export(footprint_lib_name=footprint_lib_name)
 
     if is_id_already_in_symbol_lib:

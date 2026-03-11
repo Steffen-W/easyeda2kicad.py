@@ -70,6 +70,8 @@ easyeda2kicad --symbol --footprint --3d --lcsc_id=C2040
 easyeda2kicad --symbol --footprint --lcsc_id=C2040
 # For symbol only
 easyeda2kicad --symbol --lcsc_id=C2040
+# For symbol only with extra custom properties
+easyeda2kicad --symbol --lcsc_id=C2040 --custom-field "Manufacturer:Texas Instruments" --custom-field "LCSC ID:C2040"
 # For footprint only
 easyeda2kicad --footprint --lcsc_id=C2040
 # For 3d model only
@@ -128,6 +130,17 @@ You can import several components in a single call:
 ```bash
 easyeda2kicad --full --lcsc_id C2040 C20197 C163691
 ```
+
+### Custom symbol fields
+
+Use `--custom-field KEY:VALUE` to add extra properties to generated symbols. The
+flag is repeatable and applies only to symbol exports.
+
+```bash
+easyeda2kicad --symbol --lcsc_id=C2040 --custom-field "Manufacturer:Texas Instruments" --custom-field "Package:LQFN-56"
+```
+
+Malformed values fail fast, and repeated keys use the last value provided.
 
 ### Using a proxy server
 
