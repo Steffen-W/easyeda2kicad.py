@@ -488,8 +488,18 @@ def convert_to_kicad(ee_symbol: EeSymbol) -> KiSymbol:
     return kicad_symbol
 
 
-def tune_footprint_ref_path(ki_symbol: KiSymbol, footprint_lib_name: str) -> None:
-    ki_symbol.info.package = f"{footprint_lib_name}:{ki_symbol.info.package}"
+def tune_footprint_ref_path(
+    ki_symbol: KiSymbol,
+    footprint_lib_name: str,
+    footprint_link_mode: str = "generated",
+    footprint_link_value: str = "",
+) -> None:
+    if footprint_link_mode == "explicit":
+        ki_symbol.info.package = footprint_link_value
+    elif footprint_link_mode == "none":
+        ki_symbol.info.package = ""
+    elif ki_symbol.info.package:
+        ki_symbol.info.package = f"{footprint_lib_name}:{ki_symbol.info.package}"
 
 
 def integrate_sub_units(
@@ -537,10 +547,17 @@ class ExporterSymbolKicad:
         self.version = kicad_version
         self.output = convert_to_kicad(ee_symbol=self.input)
 
-    def export(self, footprint_lib_name: str) -> str:
+    def export(
+        self,
+        footprint_lib_name: str,
+        footprint_link_mode: str = "generated",
+        footprint_link_value: str = "",
+    ) -> str:
         tune_footprint_ref_path(
             ki_symbol=self.output,
             footprint_lib_name=footprint_lib_name,
+            footprint_link_mode=footprint_link_mode,
+            footprint_link_value=footprint_link_value,
         )
         main_content = self.output.export(kicad_version=self.version)
 

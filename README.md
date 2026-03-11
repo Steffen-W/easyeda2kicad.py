@@ -129,6 +129,16 @@ You can import several components in a single call:
 easyeda2kicad --full --lcsc_id C2040 C20197 C163691
 ```
 
+### Symbol footprint links
+
+Use `--footprint-link-mode` to control the symbol `Footprint` property:
+
+```bash
+easyeda2kicad --symbol --lcsc_id=C2040 --footprint-link-mode generated
+easyeda2kicad --symbol --lcsc_id=C2040 --footprint-link-mode explicit --footprint-link CorpLib:QFN-32
+easyeda2kicad --symbol --lcsc_id=C2040 --footprint-link-mode none
+```
+
 ### Using a proxy server
 
 Set the `HTTPS_PROXY` environment variable — no extra argument needed:
