@@ -27,31 +27,38 @@
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
+      "Datasheet"
+      "https://www.lcsc.com/datasheet/C2838500.pdf"
+      (id 3)
+      (at 0 -36.83 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
       "Manufacturer"
       "ESPRESSIF(乐鑫)"
       (id 4)
-      (at 0 -36.83 0)
+      (at 0 -39.37 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "MPN"
       "ESP32-C3"
       (id 5)
-      (at 0 -39.37 0)
+      (at 0 -41.91 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "LCSC Part"
       "C2838500"
       (id 6)
-      (at 0 -41.91 0)
+      (at 0 -44.45 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "ki_keywords"
       "Other Processors and Microcontrollers (MCUs)"
       (id 8)
-      (at 0 -44.45 0)
+      (at 0 -46.99 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (symbol "ESP32-C3_0_1"

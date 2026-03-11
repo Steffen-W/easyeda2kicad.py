@@ -27,31 +27,38 @@
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
+      "Datasheet"
+      "https://www.lcsc.com/datasheet/C2856808.pdf"
+      (id 3)
+      (at 0 -52.07 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
       "Manufacturer"
       "XUNPU(讯普)"
       (id 4)
-      (at 0 -52.07 0)
+      (at 0 -54.61 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "MPN"
       "FPC-05F-30PH20"
       (id 5)
-      (at 0 -54.61 0)
+      (at 0 -57.15 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "LCSC Part"
       "C2856808"
       (id 6)
-      (at 0 -57.15 0)
+      (at 0 -59.69 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "ki_keywords"
       "FFC/FPC Connectors"
       (id 8)
-      (at 0 -59.69 0)
+      (at 0 -62.23 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (symbol "FPC-05F-30PH20_0_1"

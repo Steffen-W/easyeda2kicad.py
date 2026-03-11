@@ -27,31 +27,38 @@
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
+      "Datasheet"
+      "https://www.lcsc.com/datasheet/C2040.pdf"
+      (id 3)
+      (at 0 -60.96 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
       "Manufacturer"
       "Raspberry Pi(树莓派)"
       (id 4)
-      (at 0 -60.96 0)
+      (at 0 -63.50 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "MPN"
       "RP2040"
       (id 5)
-      (at 0 -63.50 0)
+      (at 0 -66.04 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "LCSC Part"
       "C2040"
       (id 6)
-      (at 0 -66.04 0)
+      (at 0 -68.58 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (property
       "ki_keywords"
       "Other Processors and Microcontrollers (MCUs)"
       (id 8)
-      (at 0 -68.58 0)
+      (at 0 -71.12 0)
       (effects (font (size 1.27 1.27) ) hide)
     )
     (symbol "RP2040_0_1"
