@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # Global imports
 import argparse
+import ctypes
 import logging
 import sys
 from pathlib import Path
@@ -180,10 +181,10 @@ def valid_arguments(arguments: dict[str, Any]) -> bool:
         # If the user passed a directory (no filename), use default lib name
         if output_path.is_dir():
             base_folder = output_path
-            lib_name = "EasyEDA"
+            lib_name = "easyeda2kicad"
         else:
             base_folder = output_path.parent
-            lib_name = output_path.stem or "EasyEDA"
+            lib_name = output_path.stem or "easyeda2kicad"
 
         if not base_folder.is_dir():
             logging.error(f"Can't find the folder : {base_folder}")

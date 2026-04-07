@@ -215,7 +215,7 @@ A~M 383.117 299.932 A 4 3.9 0 1 1 391.082 299.936~~#880000~1~0~none~gge17~0
   - `large-arc-flag` - 0 or 1 (use larger arc)
   - `sweep-flag` - 0 or 1 (sweep direction)
   - `x, y` - End point
-  
+
   ---
 
 ## PL - Polyline

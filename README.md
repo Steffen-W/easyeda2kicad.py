@@ -18,18 +18,15 @@ A Python script that converts any electronic components from [EasyEDA](https://e
   <img src="https://raw.githubusercontent.com/uPesy/easyeda2kicad.py/master/ressources/demo_footprint.png" width="500">
 </div>
 
-## 🎆 Sponsor and Support
+## 💾 Installation
 
-If this tool has saved you a lot of time when designing a PCB, please consider supporting the project by :
-
-- Subscribing to uPesy Premium Membership to have access to high-quality electronics tutorials at https://www.upesy.com/products/subscription
-- Buying one of my ESP32 DevKit boards: https://www.upesy.com/pages/store
-
-<div align="center">
-<a href="https://www.upesy.com/" target="_blank"><img src="https://raw.githubusercontent.com/uPesy/easyeda2kicad.py/master/ressources/upesy_store.jpg" width="350"/></a>
+If you have already Python installed you can run directly in the common terminal.<br>
+If not, you can use the Python executable included with Kicad by using the KiCad Command Prompt.
+<div align="left">
+  <img src="/ressources/kicad_command_prompt_install.png" width="800">
 </div>
 
-## 💾 Installation
+Then run this command to install easyeda2kicad
 
 ```bash
 pip install easyeda2kicad
@@ -174,9 +171,9 @@ easyeda2kicad --symbol --footprint --lcsc_id=C2040
 
 For detailed information about the EasyEDA data format and how commands are parsed:
 
-- **[CMD_FOOTPRINT.md](CMD_FOOTPRINT.md)** - Compact reference for all footprint commands (PAD, TRACK, RECT, etc.) with field definitions and real examples
-- **[CMD_SYMBOL.md](CMD_SYMBOL.md)** - Compact reference for all symbol commands (P, R, C, E, A, PL, PG, PT) with field definitions and real examples
-- **[CMD_3D_MODEL.md](CMD_3D_MODEL.md)** - Reference for 3D model download, OBJ/STEP formats, and WRL conversion
+- **[CMD_FOOTPRINT.md](docs/CMD_FOOTPRINT.md)** - Compact reference for all footprint commands (PAD, TRACK, RECT, etc.) with field definitions and real examples
+- **[CMD_SYMBOL.md](docs/CMD_SYMBOL.md)** - Compact reference for all symbol commands (P, R, C, E, A, PL, PG, PT) with field definitions and real examples
+- **[CMD_3D_MODEL.md](docs/CMD_3D_MODEL.md)** - Reference for 3D model download, OBJ/STEP formats, and WRL conversion
 
 ## 🔥 Important Notes
 
