@@ -22,7 +22,9 @@ from easyeda2kicad.easyeda.easyeda_importer import (
 # ---------------------------------------------------------------------------
 
 
-def _symbol_data(*, lcsc: dict[str, Any] | None = None, c_para_extra: dict[str, Any] | None = None) -> dict[str, Any]:
+def _symbol_data(
+    *, lcsc: dict[str, Any] | None = None, c_para_extra: dict[str, Any] | None = None
+) -> dict[str, Any]:
     c_para: dict[str, Any] = {"name": "TestPart", "pre": "U", "package": "QFN-32"}
     if c_para_extra:
         c_para.update(c_para_extra)
@@ -40,7 +42,9 @@ def _symbol_data(*, lcsc: dict[str, Any] | None = None, c_para_extra: dict[str, 
     return data
 
 
-def _footprint_data(*, lcsc_number: str = "", c_para_extra: dict[str, Any] | None = None) -> dict[str, Any]:
+def _footprint_data(
+    *, lcsc_number: str = "", c_para_extra: dict[str, Any] | None = None
+) -> dict[str, Any]:
     c_para: dict[str, Any] = {"package": "SOT-23", "name": "TestPart", "pre": "U"}
     if c_para_extra:
         c_para.update(c_para_extra)
