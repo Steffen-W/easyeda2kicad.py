@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import fields
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
@@ -51,6 +52,15 @@ from .parameters_easyeda import (
     EeSymbolRectangle,
     EeFootprint,
 )
+
+
+# Characters illegal in KiCad LIB_IDs (lib_id.cpp: isLegalChar) or on the filesystem.
+# '/' is legal in KiCad names but is a path separator on Linux/Mac.
+_ILLEGAL_FOOTPRINT_NAME_RE = re.compile(r'[/\\:<>"\t\n\r]')
+
+
+def _sanitize_footprint_name(name: str) -> str:
+    return _ILLEGAL_FOOTPRINT_NAME_RE.sub("_", name)
 
 
 def _sanitize_component_name(name: str) -> str:
@@ -524,7 +534,7 @@ class EasyedaFootprintImporter:
     ) -> EeFootprint:
         new_ee_footprint = EeFootprint(
             info=EeFootprintInfo(
-                name=ee_data_info["package"],
+                name=_sanitize_footprint_name(ee_data_info["package"]),
                 fp_type="smd" if is_smd else "tht",
                 model_3d_name=ee_data_info.get("3DModel", ""),
                 lcsc_id=lcsc_id,
