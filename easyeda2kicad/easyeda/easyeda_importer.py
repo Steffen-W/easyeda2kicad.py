@@ -449,7 +449,21 @@ class EasyedaSymbolImporter:
             origin_y = _safe_float(head_data.get("y")) or 0.0
 
         lcsc_dict = ee_data.get("lcsc") or {}
-        lcsc_number = lcsc_dict.get("number", "")
+        lcsc_number = (
+            lcsc_dict.get("number", "")
+            or ee_data_info.get("Supplier Part", "")
+            or ee_data_info.get("LCSC Part", "")
+        )
+        datasheet = (
+            lcsc_dict.get("url", "")
+            or ee_data_info.get("link", "")
+            or ee_data_info.get("datasheet", "")
+            or (
+                f"https://www.lcsc.com/datasheet/{lcsc_number}.pdf"
+                if lcsc_number and lcsc_number.startswith("C")
+                else ""
+            )
+        )
 
         new_ee_symbol = EeSymbol(
             info=EeSymbolInfo(
@@ -460,12 +474,7 @@ class EasyedaSymbolImporter:
                 or ee_data_info.get("BOM_Manufacturer", ""),
                 mpn=ee_data_info.get("Manufacturer Part", "")
                 or ee_data_info.get("BOM_Manufacturer Part", ""),
-                datasheet=lcsc_dict.get("url", "")
-                or (
-                    f"https://www.lcsc.com/datasheet/{lcsc_number}.pdf"
-                    if lcsc_number
-                    else ""
-                ),
+                datasheet=datasheet,
                 lcsc_id=lcsc_number,
                 keywords=" ".join(ee_data.get("tags", [])),
                 description=ee_data.get("description", ""),
@@ -507,11 +516,16 @@ class EasyedaFootprintImporter:
                 and "-TH_" not in self.input["packageDetail"]["title"]
             )
 
+        _lcsc_id = (
+            self.input.get("lcsc", {}).get("number", "")
+            or _c_para.get("Supplier Part", "")
+            or _c_para.get("LCSC Part", "")
+        )
         self.output = self.extract_easyeda_data(
             ee_data_str=self.input["packageDetail"]["dataStr"],
             ee_data_info=_c_para,
             is_smd=_is_smd,
-            lcsc_id=self.input.get("lcsc", {}).get("number", ""),
+            lcsc_id=_lcsc_id,
             manufacturer=_c_para.get("Manufacturer", "")
             or _c_para.get("BOM_Manufacturer", ""),
             mpn=_c_para.get("Manufacturer Part", "")
