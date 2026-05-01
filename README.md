@@ -158,6 +158,14 @@ For detailed information about the EasyEDA data format and how commands are pars
 - **[CMD_SYMBOL.md](docs/CMD_SYMBOL.md)** - Compact reference for all symbol commands (P, R, C, E, A, PL, PG, PT) with field definitions and real examples
 - **[CMD_3D_MODEL.md](docs/CMD_3D_MODEL.md)** - Reference for 3D model download, OBJ/STEP formats, and WRL conversion
 
+## GUIs & related projects
+
+- [Import-LIB-KiCad-Plugin](https://github.com/Steffen-W/Import-LIB-KiCad-Plugin) — KiCad plugin with GUI to import components directly within KiCad
+- [EasyEDA2Kicad-GUI](https://github.com/ProjectProcrastinator/EasyEDA2Kicad-GUI) — cross-platform desktop GUI wrapper (Electron)
+- [kicad_jlcimport](https://github.com/jvanderberg/kicad_jlcimport) — independent JLCPCB component importer for KiCad
+- [easyEdaDownloader](https://github.com/JoeShade/easyEdaDownloader) — Chrome extension to download EasyEDA components (JavaScript)
+- [easyeda2eagle](https://github.com/nschurando/easyeda2eagle) — EasyEDA to Eagle converter, based on this project
+
 ## 🔥 Important Notes
 
 ### WARRANTY
