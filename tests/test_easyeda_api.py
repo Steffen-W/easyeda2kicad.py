@@ -528,7 +528,8 @@ class TestSearchJlcpcbComponents:
 
         monkeypatch.setattr("urllib.request.urlopen", raise_err)
         result = api.search_jlcpcb_components("anything")
-        assert result == {"total": 0, "results": []}
+        assert result["total"] == 0 and result["results"] == []
+        assert "no net" in result["error"]
 
     def test_part_type_filter_included(self, monkeypatch: pytest.MonkeyPatch) -> None:
         api = EasyedaApi(use_cache=False)

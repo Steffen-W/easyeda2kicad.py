@@ -188,10 +188,35 @@ class TestSearchJlcpcbComponents:
         r = api.search_jlcpcb_components("100uF 25V")["results"][0]
 
         assert r["type"] == "Extended"
+        assert r["preferred"] is False
+        assert r["placeholder"] is False
         assert r["price"] is None
         assert r["price_breaks"] == []
         assert r["reel_qty"] is None
         assert r["datasheet"] == "https://datasheet.lcsc.com/lcsc/some.pdf"
+
+    def test_preferred_extended_flag(
+        self, api: EasyedaApi, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """preferredComponentFlag marks Extended parts without setup fee."""
+        item = {**_item_capacitor_extended(), "preferredComponentFlag": True}
+        monkeypatch.setattr(
+            "urllib.request.urlopen", _fake_response(_jlcpcb_response([item]))
+        )
+
+        r = api.search_jlcpcb_components("100uF 25V")["results"][0]
+
+        assert r["type"] == "Extended"
+        assert r["preferred"] is True
+        assert r["setup_fee"] is False
+
+    def test_setup_fee_flag(
+        self, api: EasyedaApi, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        raw = _jlcpcb_response([_item_resistor(), _item_capacitor_extended()])
+        monkeypatch.setattr("urllib.request.urlopen", _fake_response(raw))
+        basic, extended = api.search_jlcpcb_components("x")["results"]
+        assert basic["setup_fee"] is False and extended["setup_fee"] is True
 
     def test_missing_fields_use_defaults(
         self, api: EasyedaApi, monkeypatch: pytest.MonkeyPatch
@@ -239,16 +264,104 @@ class TestSearchJlcpcbComponents:
         monkeypatch.setattr("urllib.request.urlopen", fail)
 
         result = api.search_jlcpcb_components("anything")
-        assert result == {"total": 0, "results": []}
+        assert result["total"] == 0 and result["results"] == []
+        assert "simulated timeout" in result["error"]
 
-    def test_empty_response_envelope(
+    def test_api_error_code_is_reported(
         self, api: EasyedaApi, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """API returning {} or missing keys must not raise."""
-        monkeypatch.setattr("urllib.request.urlopen", _fake_response({}))
+        """JLCPCB answers unknown parameters with {"code": 101, "data": None}."""
+        monkeypatch.setattr(
+            "urllib.request.urlopen",
+            _fake_response({"success": False, "code": 101, "message": "x"}),
+        )
+        result = api.search_jlcpcb_components("anything")
+        assert result["results"] == [] and "101" in result["error"]
+
+    def test_filters_are_sent_to_jlcpcb(
+        self, api: EasyedaApi, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sent: list[dict[str, Any]] = []
+
+        def fake_urlopen(req: Any, **_kwargs: Any) -> Any:
+            sent.append(json.loads(req.data))
+            return _fake_response(_jlcpcb_response([]))()
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        api.search_jlcpcb_components("10k", packages=["0402"], in_stock=True)
+        api.search_jlcpcb_components("10k", sort="stock")
+        api.search_jlcpcb_components("10k")
+
+        assert sent[0]["componentSpecificationList"] == ["0402"]
+        assert sent[0]["stockFlag"] is True
+        assert (sent[1]["sortMode"], sent[1]["sortASC"]) == ("STOCK_SORT", "DESC")
+        assert set(sent[2]) == {"keyword", "currentPage", "pageSize"}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"data": None},
+            {"data": []},
+            {"data": {"componentPageInfo": {"list": []}}},
+            [],
+        ],
+    )
+    def test_unexpected_response_is_an_error(
+        self, api: EasyedaApi, monkeypatch: pytest.MonkeyPatch, payload: Any
+    ) -> None:
+        """A changed or empty envelope must not look like "no matches"."""
+        monkeypatch.setattr("urllib.request.urlopen", _fake_response(payload))
 
         result = api.search_jlcpcb_components("ghost")
-        assert result == {"total": 0, "results": []}
+        assert result["results"] == [] and "unexpected" in result["error"]
+
+    @pytest.mark.parametrize(
+        "page_list",
+        [
+            {"bad": "shape"},
+            "bad",
+            [None],
+            ["C15220"],
+            [{"componentCode": "C1", "componentPrices": "bad"}],
+            [{"componentCode": "C1", "componentPrices": {"0": 1}}],
+            [{"componentCode": "C1", "attributes": [None]}],
+            [{"componentCode": "C1", "stockCount": "many"}],
+            [{"componentCode": "C1", "stockCount": float("inf")}],  # JSON 1e999
+            [{"componentCode": "C1", "stockCount": float("nan")}],
+        ],
+    )
+    def test_invalid_result_list_is_an_error(
+        self, api: EasyedaApi, monkeypatch: pytest.MonkeyPatch, page_list: Any
+    ) -> None:
+        """Malformed result entries must give an error, not a crash."""
+        payload = {"data": {"componentPageInfo": {"total": 1, "list": page_list}}}
+        monkeypatch.setattr("urllib.request.urlopen", _fake_response(payload))
+
+        result = api.search_jlcpcb_components("ghost")
+        assert result["results"] == [] and "unexpected" in result["error"]
+
+    def test_no_matches_is_not_an_error(
+        self, api: EasyedaApi, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Real JLCPCB answer without matches: total 0, list null."""
+        payload = {
+            "code": 200,
+            "data": {"componentPageInfo": {"total": 0, "list": None}},
+        }
+        monkeypatch.setattr("urllib.request.urlopen", _fake_response(payload))
+
+        assert api.search_jlcpcb_components("ghost") == {"total": 0, "results": []}
+
+    def test_invalid_json_is_an_error(
+        self, api: EasyedaApi, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cm = MagicMock()
+        cm.__enter__ = MagicMock(return_value=io.BytesIO(b"<html>maintenance</html>"))
+        cm.__exit__ = MagicMock(return_value=False)
+        monkeypatch.setattr("urllib.request.urlopen", MagicMock(return_value=cm))
+
+        assert "unexpected" in api.search_jlcpcb_components("ghost")["error"]
 
 
 # ---------------------------------------------------------------------------

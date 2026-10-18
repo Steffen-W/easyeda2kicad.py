@@ -113,6 +113,18 @@ Malformed values (missing `:`) fail fast. Duplicate keys use the last value.
 
 If EasyEDA does not provide a datasheet URL for a symbol, easyeda2kicad falls back to `https://www.lcsc.com/datasheet/<LCSC-ID>.pdf`.
 
+### JLCPCB parts search, stock check and datasheets
+
+Search the JLCPCB assembly parts library, check stock and download datasheets (no login needed):
+
+```bash
+easyeda2kicad --search 10k --package 0402 --basic-only   # Basic part, no setup fee
+easyeda2kicad --stock C15220 C841192                     # exact match by LCSC number
+easyeda2kicad --datasheet C15220 --datasheet-dir ds      # saves ds/BQ24073RGTR_C15220.pdf
+```
+
+All options, the `--json` output and exit codes: [docs/JLCPCB_PARTS.md](docs/JLCPCB_PARTS.md).
+
 ### Using a proxy server
 
 Set the `HTTPS_PROXY` environment variable — no extra argument needed:

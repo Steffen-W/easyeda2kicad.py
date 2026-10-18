@@ -18,6 +18,13 @@ from .easyeda.easyeda_importer import (
 )
 from .easyeda.easyeda_svg_renderer import render_footprint_svg, render_symbol_svg
 from .easyeda.parameters_easyeda import EeSymbol
+from .jlcpcb_cli import (
+    PARTS_HELP,
+    add_parts_arguments,
+    check_parts_arguments,
+    has_parts_command,
+    run_parts_commands,
+)
 from .kicad.export_kicad_3d_model import Exporter3dModelKicad
 from .kicad.export_kicad_footprint import ExporterFootprintKicad
 from .kicad.export_kicad_symbol import ExporterSymbolKicad
@@ -43,10 +50,13 @@ def parse_custom_fields(custom_field_args: list[str]) -> dict[str, str]:
 
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        prog="easyeda2kicad",
         description=(
             "A Python script that convert any electronic components from LCSC or"
             " EasyEDA to a Kicad library"
-        )
+        ),
+        epilog=PARTS_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     parser.add_argument(
@@ -144,12 +154,17 @@ def get_parser() -> argparse.ArgumentParser:
         help="Add custom symbol properties, e.g. --custom-field 'Mfr:TI' 'Package:SOT-23'",
     )
 
+    add_parts_arguments(parser)
     return parser
 
 
 def valid_arguments(arguments: dict[str, Any]) -> bool:
     if not arguments.get("lcsc_id") and not arguments.get("uuid"):
-        logging.error("Either --lcsc_id or --uuid must be provided")
+        logging.error(
+            "Nothing to do: import a part with --lcsc_id C… --full (or --uuid),"
+            " or use --search/--stock/--datasheet for the JLCPCB parts library."
+            " See --help for examples."
+        )
         return False
 
     if arguments.get("lcsc_id"):
@@ -342,12 +357,14 @@ def _process_component(
 
 
 def main(argv: list[str] = sys.argv[1:]) -> int:
-    print(f"-- easyeda2kicad.py v{__version__} --")
+    # stderr keeps stdout clean for --json output
+    print(f"-- easyeda2kicad.py v{__version__} --", file=sys.stderr)
 
     # cli interface
     parser = get_parser()
     try:
         args = parser.parse_args(argv)
+        check_parts_arguments(parser, vars(args))
     except SystemExit as err:
         return err.code if isinstance(err.code, int) else 1
     arguments = vars(args)
@@ -362,6 +379,12 @@ def main(argv: list[str] = sys.argv[1:]) -> int:
             logging.Formatter(fmt="[{levelname}] {message}", style="{")
         )
         root_logger.addHandler(handler)
+
+    parts_exit_code = 0
+    if has_parts_command(arguments):
+        parts_exit_code = run_parts_commands(arguments)
+        if not arguments.get("lcsc_id") and not arguments.get("uuid"):
+            return parts_exit_code
 
     if not valid_arguments(arguments=arguments):
         return 1
@@ -379,7 +402,7 @@ def main(argv: list[str] = sys.argv[1:]) -> int:
             if not _process_component(arguments, api, uuid=uuid):
                 had_errors = True
 
-    return 1 if had_errors else 0
+    return max(parts_exit_code, 1 if had_errors else 0)
 
 
 if __name__ == "__main__":

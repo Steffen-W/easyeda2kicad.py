@@ -11,6 +11,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -49,6 +50,94 @@ ENDPOINT_V2_DOCUMENT_DATASTR = "/api/documents/{uuid}/datastrid"  # requires aut
 
 # JLCPCB component search returns lcsc, name, package, stock, price
 JLCPCB_SEARCH_API = "https://jlcpcb.com/api/overseas-pcb-order/v1/shoppingCart/smtGood/selectSmtComponentList"
+
+# Sort orders of the JLCPCB search (without one, JLCPCB sorts by relevance)
+JLCPCB_SORT_MODES: dict[str, tuple[str, str]] = {
+    "stock": ("STOCK_SORT", "DESC"),
+    "price": ("PRICE_SORT", "ASC"),
+}
+
+# get_jlcpcb_component() looks for the exact code among this many search results
+JLCPCB_LOOKUP_RESULTS = 50
+
+# LCSC "datasheet" URLs usually return an HTML viewer page; the real PDF link
+# inside it has this form.
+LCSC_PDF_LINK_RE = re.compile(
+    rb"https://datasheet\.lcsc\.com/datasheet/pdf/[0-9A-Za-z_-]+\.pdf"
+)
+
+
+class JlcpcbError(Exception):
+    """A part or datasheet is not available (not listed, no PDF, write error)."""
+
+
+class JlcpcbConnectionError(JlcpcbError):
+    """JLCPCB/LCSC could not be reached or sent an unexpected response."""
+
+
+def normalize_lcsc_id(lcsc_id: str) -> str:
+    """Normalize an LCSC number: "c15220 " -> "C15220", "15220" -> "C15220"."""
+    code = lcsc_id.strip().upper()
+    return f"C{code}" if code.isdigit() else code
+
+
+def _is_placeholder(item: dict[str, Any]) -> bool:
+    """True for JLCPCB customer-library entries that are not real stocked parts."""
+    code = str(item.get("componentCode", ""))
+    brand = str(item.get("componentBrandEn", ""))
+    return code.startswith("C9900") or brand.startswith("JLCPCB Assembl")
+
+
+def _parse_jlcpcb_item(item: Any) -> dict[str, Any]:
+    """One entry of componentPageInfo.list as a part dict.
+
+    Raises TypeError, AttributeError, KeyError, ValueError or OverflowError
+    (e.g. stockCount 1e999) for another shape.
+    """
+    if not isinstance(item, dict):
+        raise TypeError(f"result entry is {type(item).__name__}, not an object")
+    prices = item.get("componentPrices") or []
+    return {
+        "lcsc": item.get("componentCode", ""),
+        "name": item.get("componentName", ""),
+        "model": item.get("componentModelEn", ""),
+        "brand": item.get("componentBrandEn", ""),
+        "package": item.get("componentSpecificationEn", ""),
+        "category": item.get("componentTypeEn", ""),
+        "stock": int(item.get("stockCount") or 0),
+        "type": "Basic" if item.get("componentLibraryType") == "base" else "Extended",
+        "preferred": bool(item.get("preferredComponentFlag")),
+        # Only Extended parts that are not Preferred have a setup fee.
+        "setup_fee": item.get("componentLibraryType") != "base"
+        and not item.get("preferredComponentFlag"),
+        # Entries from JLCPCB's customer library (C9900…, "JLCPCB Assembly")
+        # are not stocked parts.
+        "placeholder": _is_placeholder(item),
+        "price": prices[0].get("productPrice") if prices else None,
+        "price_breaks": [
+            {"qty": p.get("startNumber"), "price": p.get("productPrice")}
+            for p in prices
+        ],
+        "min_qty": item.get("minPurchaseNum", 1),
+        "reel_qty": item.get("encapsulationNumber"),
+        "description": item.get("describe", ""),
+        "url": item.get("lcscGoodsUrl", ""),
+        "datasheet": item.get("dataManualUrl", ""),
+        # Technical specs list; entries with value "-" are omitted as uninformative.
+        "attributes": [
+            {
+                "name": a.get("attribute_name_en", ""),
+                "value": a["attribute_value_name"],
+            }
+            for a in (item.get("attributes") or [])
+            if a.get("attribute_value_name") and a["attribute_value_name"] != "-"
+        ],
+    }
+
+
+def _safe_filename(text: str) -> str:
+    return re.sub(r"[^\w.-]+", "_", text).strip("_") or "datasheet"
+
 
 # ------------------------------------------------------------
 
@@ -333,13 +422,20 @@ class EasyedaApi:
         page: int = 1,
         page_size: int = 10,
         part_type: str | None = None,
+        packages: list[str] | None = None,
+        in_stock: bool = False,
+        sort: str | None = None,
     ) -> dict[str, Any]:
         """POST JLCPCB_SEARCH_API — keyword search across the JLCPCB parts library.
 
         Works anonymously. Returns dict with 'total' and 'results' list; each result
-        contains: lcsc, name, model, brand, package, category, stock, type, price,
-        price_breaks, min_qty, reel_qty, description, url, datasheet, attributes.
-        part_type: "base" = Basic, "expand" = Extended.
+        contains: lcsc, name, model, brand, package, category, stock, type,
+        preferred, setup_fee, placeholder, price, price_breaks, min_qty, reel_qty,
+        description, url, datasheet, attributes.
+        On failure the dict also has an 'error' message.
+        Filters, applied by JLCPCB ('total' counts the filtered matches):
+        part_type "base" (Basic) or "expand" (Extended); packages, exact and
+        case-sensitive ("0402", "SOT-23-5"); in_stock; sort, a JLCPCB_SORT_MODES key.
         """
         payload: dict[str, Any] = {
             "keyword": keyword,
@@ -348,6 +444,12 @@ class EasyedaApi:
         }
         if part_type:
             payload["componentLibraryType"] = part_type
+        if packages:
+            payload["componentSpecificationList"] = packages
+        if in_stock:
+            payload["stockFlag"] = True
+        if sort:
+            payload["sortMode"], payload["sortASC"] = JLCPCB_SORT_MODES[sort]
 
         try:
             req = urllib.request.Request(  # noqa: S310
@@ -363,53 +465,109 @@ class EasyedaApi:
             with urllib.request.urlopen(  # noqa: S310
                 req, timeout=15, context=self.ssl_context
             ) as response:
-                raw: dict[str, Any] = json.loads(self._decode_response(response.read()))
-        except (urllib.error.URLError, json.JSONDecodeError) as e:
-            logging.error(f"JLCPCB search failed: {e}")
-            return {"total": 0, "results": []}
-
-        page_info: dict[str, Any] = (raw.get("data") or {}).get(
-            "componentPageInfo"
-        ) or {}
-        items: list[dict[str, Any]] = page_info.get("list") or []
-        results = []
-        for item in items:
-            prices = item.get("componentPrices") or []
-            results.append(
-                {
-                    "lcsc": item.get("componentCode", ""),
-                    "name": item.get("componentName", ""),
-                    "model": item.get("componentModelEn", ""),
-                    "brand": item.get("componentBrandEn", ""),
-                    "package": item.get("componentSpecificationEn", ""),
-                    "category": item.get("componentTypeEn", ""),
-                    "stock": item.get("stockCount", 0),
-                    "type": "Basic"
-                    if item.get("componentLibraryType") == "base"
-                    else "Extended",
-                    "price": prices[0].get("productPrice") if prices else None,
-                    "price_breaks": [
-                        {"qty": p.get("startNumber"), "price": p.get("productPrice")}
-                        for p in prices
-                    ],
-                    "min_qty": item.get("minPurchaseNum", 1),
-                    "reel_qty": item.get("encapsulationNumber"),
-                    "description": item.get("describe", ""),
-                    "url": item.get("lcscGoodsUrl", ""),
-                    "datasheet": item.get("dataManualUrl", ""),
-                    # Technical specs list; entries with value "-" are omitted as uninformative.
-                    "attributes": [
-                        {
-                            "name": a.get("attribute_name_en", ""),
-                            "value": a["attribute_value_name"],
-                        }
-                        for a in (item.get("attributes") or [])
-                        if a.get("attribute_value_name")
-                        and a["attribute_value_name"] != "-"
-                    ],
-                }
+                body = response.read()
+        except (urllib.error.URLError, OSError) as e:
+            return self._search_error(f"JLCPCB not reachable: {e}")
+        try:
+            raw = json.loads(self._decode_response(body))
+        except (ValueError, OSError, EOFError, zlib.error) as e:
+            return self._search_error(f"unexpected JLCPCB response: {e}")
+        if not isinstance(raw, dict):
+            return self._search_error("unexpected JLCPCB response: not a JSON object")
+        if raw.get("code", 200) != 200:
+            return self._search_error(
+                f"JLCPCB API error {raw.get('code')}: {raw.get('message')}"
             )
-        return {"total": page_info.get("total", 0), "results": results}
+
+        # A valid answer always has componentPageInfo with a numeric total;
+        # "list" is null when nothing matches.
+        data = raw.get("data")
+        page_info = data.get("componentPageInfo") if isinstance(data, dict) else None
+        if not isinstance(page_info, dict) or not isinstance(
+            page_info.get("total"), int
+        ):
+            return self._search_error("unexpected JLCPCB response: no result list")
+        items = page_info.get("list")
+        try:
+            if items is not None and not isinstance(items, list):
+                raise TypeError(f"result list is {type(items).__name__}")
+            results = [_parse_jlcpcb_item(item) for item in items or []]
+        except (TypeError, AttributeError, KeyError, ValueError, OverflowError) as e:
+            return self._search_error(f"unexpected JLCPCB response: {e}")
+        return {"total": page_info["total"], "results": results}
+
+    @staticmethod
+    def _search_error(message: str) -> dict[str, Any]:
+        logging.error(f"JLCPCB search failed: {message}")
+        return {"total": 0, "results": [], "error": message}
+
+    def get_jlcpcb_component(self, lcsc_id: str) -> dict[str, Any] | None:
+        """Exact-match lookup of one LCSC part number (e.g. "C15220").
+
+        Searches JLCPCB for the code and returns the entry of the first
+        JLCPCB_LOOKUP_RESULTS results with exactly this code, or None. JLCPCB
+        ranks the exact code first, but there is no detail endpoint, so a part
+        ranked lower would be reported as not listed. Raises
+        JlcpcbConnectionError on network or API errors.
+        """
+        wanted = normalize_lcsc_id(lcsc_id)
+        data = self.search_jlcpcb_components(wanted, page_size=JLCPCB_LOOKUP_RESULTS)
+        if "error" in data:
+            raise JlcpcbConnectionError(data["error"])
+        results: list[dict[str, Any]] = data["results"]
+        for result in results:
+            if str(result.get("lcsc", "")).upper() == wanted:
+                return result
+        return None
+
+    def _http_get(self, url: str, accept: str) -> bytes:
+        """GET url; raises JlcpcbConnectionError on any network or gzip error."""
+        try:
+            req = urllib.request.Request(  # noqa: S310
+                url=url, headers={**self.headers, "Accept": accept}
+            )
+            with urllib.request.urlopen(  # noqa: S310
+                req, timeout=60, context=self.ssl_context
+            ) as response:
+                data: bytes = response.read()
+            if data[:2] == b"\x1f\x8b":
+                data = gzip.decompress(data)
+        except (urllib.error.URLError, OSError, EOFError, zlib.error) as e:
+            raise JlcpcbConnectionError(f"download of {url} failed: {e}") from e
+        return data
+
+    def download_datasheet(self, lcsc_id: str, out_dir: str | Path) -> Path:
+        """Save the datasheet PDF of an LCSC part as out_dir/<MPN>_<LCSC>.pdf.
+
+        The datasheet URL often returns an HTML viewer page; the PDF link in it
+        (LCSC_PDF_LINK_RE) is followed. Returns the file path. Raises
+        JlcpcbConnectionError on network errors, JlcpcbError if the part or PDF
+        is missing or the file cannot be written.
+        """
+        component = self.get_jlcpcb_component(lcsc_id)
+        if component is None:
+            raise JlcpcbError("not listed at JLCPCB")
+        url = str(component.get("datasheet") or "")
+        if not url.startswith(("https://", "http://")):
+            raise JlcpcbError("JLCPCB has no datasheet link for this part")
+
+        accept = "application/pdf,text/html;q=0.9,*/*;q=0.8"
+        data = self._http_get(url, accept)
+        if not data.startswith(b"%PDF"):
+            match = LCSC_PDF_LINK_RE.search(data)
+            data = self._http_get(match.group(0).decode(), accept) if match else b""
+        if not data.startswith(b"%PDF"):
+            raise JlcpcbError(f"no PDF found behind {url}")
+
+        out_path = Path(out_dir)
+        name = _safe_filename(str(component.get("model") or lcsc_id))
+        file_path = out_path / f"{name}_{component['lcsc']}.pdf"
+        try:
+            out_path.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(data)
+        except OSError as e:
+            raise JlcpcbError(f"could not write {file_path}: {e}") from e
+        return file_path
 
     def get_svg_from_api(self, lcsc_id: str) -> dict[str, Any]:
         """Return pre-rendered SVGs from the EasyEDA /svgs endpoint as ``{"symbol": str, "footprint": str}``.
