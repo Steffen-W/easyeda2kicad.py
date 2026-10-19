@@ -21,7 +21,7 @@ KI_PACKAGE_VALUE = (
     " (font (size 1 1) (thickness 0.15)))\n\t)\n"
 )
 KI_FAB_REF = (
-    "\t(fp_text user %R (at 0 0) (layer F.Fab)\n\t\t(effects (font (size 1 1)"
+    "\t(fp_text user %R (at {pos_x:.3f} {pos_y:.3f}) (layer F.Fab)\n\t\t(effects (font (size 1 1)"
     " (thickness 0.15)))\n\t)\n"
 )
 KI_END_FILE = ")"
@@ -106,9 +106,7 @@ KI_LAYERS = {
     13: "F.Fab",  # TopAssembly
     14: "B.Fab",  # BottomAssembly
     15: "Dwgs.User",  # Mechanical
-    99: "F.CrtYd",  # ComponentShapeLayer (LIBBODY) - invisible in EasyEDA, maps to courtyard in KiCad
-    100: "F.Fab",  # LeadShapeLayer - lead shapes for fabrication
-    101: "F.SilkS",  # ComponentPolarityLayer - polarity markings on silkscreen
+    99: "F.Fab",  # ComponentShapeLayer - package body, hidden in EasyEDA
 }
 
 
@@ -200,7 +198,7 @@ class KiFootprintVia:
 
 # ---------------- SOLID REGION ----------------
 # EasyEDA SOLIDREGION: filled polygon on silkscreen or fab layer
-# (e.g. pin-1 dot, polarity mark, component outline fill).
+# (e.g. pin-1 dot, polarity mark).
 # Maps to KiCad fp_poly.
 @dataclass
 class KiFootprintSolidRegion:
@@ -257,4 +255,7 @@ class KiFootprint:
     rectangles: list[KiFootprintRectangle] = field(default_factory=list)
     texts: list[KiFootprintText] = field(default_factory=list)
     solid_regions: list[KiFootprintSolidRegion] = field(default_factory=list)
+    reference_pos: tuple[float, float] = (0.0, 0.0)
+    value_pos: tuple[float, float] = (0.0, 0.0)
+    fab_reference_pos: tuple[float, float] = (0.0, 0.0)
     copper_areas: list[KiFootprintCopperArea] = field(default_factory=list)

@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Union
 
+from .svg_path_parser import parse_svg_font_size
+
 
 # Safe conversion helpers – used by all EasyEDA dataclass __post_init__ methods.
 # EasyEDA API returns all field values as strings; these helpers handle the conversion.
@@ -316,19 +318,28 @@ class EeSymbolPath:
 
 
 # ---------------- TEXT ----------------
+def ee_font_size(text: str) -> float:
+    """Font size in px of an EasyEDA font size such as "9pt"; EasyEDA's
+    default 7pt if it is missing or invalid."""
+    try:
+        return parse_svg_font_size(text)
+    except ValueError:
+        return parse_svg_font_size("7pt")
+
+
 @dataclass
 class EeSymbolText:
     text: str
     pos_x: float
     pos_y: float
     rotation: float
-    font_size: float  # in mm
+    font_size: float  # in px
+    text_anchor: str  # SVG text-anchor: "start" (also if empty), "middle" or "end"
 
     def __post_init__(self) -> None:
         self.pos_x = _safe_float(self.pos_x)
         self.pos_y = _safe_float(self.pos_y)
         self.rotation = _safe_float(self.rotation)
-        self.font_size = _safe_float(self.font_size, 1.27)
 
 
 # ---------------- SYMBOL ----------------

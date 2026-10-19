@@ -337,8 +337,8 @@ T~L~400~290~0~#0000FF~Tahoma~11.5pt~0.1~~middle~comment~RP2040~1~middle~gge860~0
 | 3     | y           | Y coordinate (canvas pixels)                                  |
 | 4     | rotation    | Rotation angle in degrees                                     |
 | 5     | color       | Text color (hex, e.g. `"#0000FF"`)                            |
-| 7     | font_size   | Font size (e.g. `"11.5pt"`) → converted to mm (`pt * 0.3528`) |
-| 9     | baseline    | Vertical alignment (usually empty)                            |
+| 7     | font_size   | Font size (e.g. `"11.5pt"`, 1pt = 4/3 px); 7pt if missing     |
+| 9     | baseline    | Vertical alignment (empty: the anchor is on the baseline)     |
 | 10    | text_anchor | Horizontal anchor: `"start"`, `"middle"`, `"end"`             |
 | 11    | role        | Text role (e.g. `"comment"`, `"pinpart"`)                     |
 | 12    | text        | Text content                                                  |
@@ -346,7 +346,12 @@ T~L~400~290~0~#0000FF~Tahoma~11.5pt~0.1~~middle~comment~RP2040~1~middle~gge860~0
 
 **Notes:**
 - Requires KiCad symbol library format version ≥ 20220102 to be preserved on save
-- Empty text fields are skipped
+- Empty and hidden texts are skipped
+- KiCad's text size is the height of capital letters, EasyEDA's font size the
+  em of Verdana, whose capitals are 0.727 em high: size = font size in px ×
+  0.254 mm × 0.727
+- `text_anchor` start/middle/end becomes `justify left`/centered/`right`,
+  always with `bottom`, which KiCad aligns to the baseline
 
 ---
 

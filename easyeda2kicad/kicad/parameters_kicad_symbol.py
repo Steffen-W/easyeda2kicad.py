@@ -506,19 +506,21 @@ class KiSymbolText:
     pos_y: float = 0.0
     rotation: float = 0.0  # degrees, counter-clockwise
     font_size: float = 1.27  # mm
+    justify: str = "left bottom"  # KiCad justify: horizontal and vertical
 
     def export(self, version: int = KICAD_SYM_VERSION_20211014) -> str:
         # Unlike pins and properties, symbol text angles are in tenths of a degree.
         return """
             (text "{text}"
               (at {pos_x:.2f} {pos_y:.2f} {rotation:.0f})
-              (effects (font (size {font_size:.2f} {font_size:.2f})))
+              (effects (font (size {font_size:.2f} {font_size:.2f})) (justify {justify}))
             )""".format(
             text=self.text.replace('"', '\\"'),
             pos_x=self.pos_x,
             pos_y=self.pos_y,
             rotation=self.rotation * 10,
             font_size=self.font_size,
+            justify=self.justify,
         )
 
 

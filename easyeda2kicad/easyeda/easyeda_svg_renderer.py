@@ -31,7 +31,7 @@ import logging
 import math
 from typing import Any
 
-from .parameters_easyeda import _safe_bool
+from .parameters_easyeda import _safe_bool, ee_font_size
 from .svg_path_parser import parse_svg_path, parse_svg_points
 
 logger = logging.getLogger(__name__)
@@ -268,11 +268,7 @@ def _render_pin(shape: str, bbox: _BBox) -> str:
             if len(seg_parts) > 5 and seg_parts[5] in ("start", "middle", "end")
             else "start"
         )
-        raw_fs = seg_parts[7] if len(seg_parts) > 7 and seg_parts[7] else "7pt"
-        try:
-            fs = float(raw_fs.replace("pt", ""))
-        except ValueError:
-            fs = 7.0
+        fs = ee_font_size(seg_parts[7] if len(seg_parts) > 7 else "")
         color = _color(seg_parts[8] if len(seg_parts) > 8 else "", "#000000")
         bbox.add(tx, ty)
         transform = f' transform="rotate({trot},{tx},{ty})"' if trot else ""
@@ -414,11 +410,7 @@ def _render_text(shape: str, bbox: _BBox) -> str:
     x, y = _f(parts[2]), _f(parts[3])
     rotation = _f(parts[4])
     color = _color(parts[5] if len(parts) > 5 else "", "#000000")
-    font_size = parts[7] if len(parts) > 7 else "7pt"
-    try:
-        fs = float(font_size.replace("pt", ""))
-    except ValueError:
-        fs = 7.0
+    fs = ee_font_size(parts[7])
     anchor = (
         parts[10]
         if len(parts) > 10 and parts[10] in ("start", "middle", "end")

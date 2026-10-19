@@ -247,7 +247,8 @@ class TestSyntheticSymbolShapes:
             )
         )
         assert "Hello" in svg
-        assert "<text " in svg
+        # 7pt in px
+        assert 'font-size="9.333' in svg
 
     def test_text_with_rotation(self) -> None:
         svg = render_symbol_svg(

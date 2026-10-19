@@ -24,6 +24,7 @@ from easyeda2kicad.kicad.export_kicad_footprint import (
     _parse_solid_region_path,
 )
 from easyeda2kicad.kicad.export_kicad_symbol import ExporterSymbolKicad
+from easyeda2kicad.kicad.parameters_kicad_footprint import KiFootprintTrack
 
 KICAD_SYM_VERSION = 20231120
 
@@ -78,7 +79,8 @@ def test_issue_208_bezier_path_keeps_its_shape_in_new_library(
 
 def test_issue_207_vertical_text_stays_vertical() -> None:
     """#207, C5310972: "PMOS" is rotated by 270° in EasyEDA. Symbol text
-    angles are tenths of a degree in KiCad."""
+    angles are tenths of a degree in KiCad, and the text must start at its
+    anchor to stay inside the body."""
     output = _export_symbol(
         "FDS4435BZ",
         ["T~L~415~305~270~#FF0000~~9pt~~~~comment~PMOS~1~start~gge7~0~pinpart"],
@@ -87,6 +89,9 @@ def test_issue_207_vertical_text_stays_vertical() -> None:
     assert angle is not None
     # 270° clockwise in EasyEDA is 90° counter-clockwise in KiCad
     assert angle.group(1) == "900"
+    # Starting at the anchor on the baseline; capitals of 9pt Verdana are
+    # 12 px * 0.727 high
+    assert "(font (size 2.22 2.22)) (justify left bottom)" in output
 
 
 def test_issue_206_solid_region_keeps_all_corners() -> None:
@@ -139,8 +144,9 @@ def test_malformed_solid_region_is_skipped(caplog: pytest.LogCaptureFixture) -> 
 def test_npth_region_becomes_closed_edge_cuts_contour(path: str) -> None:
     region = EeFootprintSolidRegion(layer_id=11, path=path, region_type="npth")
     cutout = _convert_solid_region(region, bbox_x=0, bbox_y=0)
-    assert cutout is not None and cutout.layer == "Edge.Cuts"
-    assert cutout.points == [(0.0, 0.0), (2.54, 0.0), (2.54, 2.54), (0.0, 0.0)]
+    assert isinstance(cutout, KiFootprintTrack) and cutout.layers == "Edge.Cuts"
+    assert cutout.points_start_x + cutout.points_end_x[-1:] == [0.0, 2.54, 2.54, 0.0]
+    assert cutout.points_start_y + cutout.points_end_y[-1:] == [0.0, 0.0, 2.54, 0.0]
 
 
 def test_issue_209_nearly_closed_arc_becomes_circle() -> None:
@@ -206,3 +212,21 @@ def test_issue_213_npth_cutout_becomes_edge_cuts(tmp_path: Path) -> None:
     radius = 0.7874 * 0.254
     corner_gap = min(math.hypot(max(xs) - x, min(ys) - y) for x, y in zip(xs, ys))
     assert corner_gap == pytest.approx(radius * (math.sqrt(2) - 1), abs=0.005)
+
+
+@pytest.mark.parametrize(
+    ("anchor", "justify"),
+    [("", "left bottom"), ("middle", "bottom"), ("end", "right bottom")],
+)
+def test_symbol_text_is_justified_by_its_anchor(anchor: str, justify: str) -> None:
+    output = _export_symbol(
+        "T", [f"T~L~0~0~0~#000000~~9pt~~~{anchor}~comment~AB~1~start~gge1~0"]
+    )
+    assert f"(justify {justify}))" in output
+
+
+def test_hidden_symbol_text_is_skipped() -> None:
+    output = _export_symbol(
+        "T", ["T~L~0~0~0~#000000~~9pt~~~~comment~AB~0~start~gge1~0"]
+    )
+    assert '(text "AB"' not in output

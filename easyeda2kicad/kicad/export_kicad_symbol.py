@@ -457,6 +457,14 @@ def convert_ee_paths(
     return shapes
 
 
+# KiCad's text size is the height of capital letters, EasyEDA's the em of
+# Verdana, whose capitals are 0.727 em high
+_VERDANA_CAP_HEIGHT = 0.727
+# KiCad horizontal justification of an SVG text-anchor; the anchor lies on
+# the baseline, which KiCad's bottom justification aligns to
+_TEXT_JUSTIFY = {"start": "left bottom", "middle": "bottom", "end": "right bottom"}
+
+
 def convert_ee_texts(
     ee_texts: list[EeSymbolText],
     ee_bbox: EeSymbolBbox,
@@ -468,7 +476,8 @@ def convert_ee_texts(
             pos_y=-px_to_mm(t.pos_y - ee_bbox.y),
             # EasyEDA rotates clockwise (y down), KiCad counter-clockwise (y up).
             rotation=-t.rotation % 360,
-            font_size=t.font_size,
+            font_size=px_to_mm(t.font_size) * _VERDANA_CAP_HEIGHT,
+            justify=_TEXT_JUSTIFY.get(t.text_anchor, _TEXT_JUSTIFY["start"]),
         )
         for t in ee_texts
     ]

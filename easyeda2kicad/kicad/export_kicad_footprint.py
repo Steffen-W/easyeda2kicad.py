@@ -2,11 +2,17 @@ from __future__ import annotations
 
 # Global imports
 import logging
-from math import degrees, isnan
+from collections.abc import Iterable
+from math import ceil, cos, degrees, floor, isnan, radians, sin
 from pathlib import Path
+from typing import Protocol, TypeVar
 
 # Local imports
-from ..easyeda.parameters_easyeda import EeFootprint, EeFootprintSolidRegion
+from ..easyeda.parameters_easyeda import (
+    EeFootprint,
+    EeFootprintSolidRegion,
+    EeFootprintText,
+)
 from ..easyeda.svg_path_parser import (
     Point,
     SvgArc,
@@ -123,17 +129,116 @@ def _track(points: list[Point], layers: str, stroke_width: float) -> KiFootprint
     )
 
 
+def _rectangle(
+    corner: Point, opposite: Point, layers: str, stroke_width: float
+) -> KiFootprintRectangle:
+    """Outline of an axis-aligned rectangle between two corners (in mm)."""
+    xs = [corner[0], opposite[0], opposite[0], corner[0]]
+    ys = [corner[1], corner[1], opposite[1], opposite[1]]
+    return KiFootprintRectangle(
+        points_start_x=xs,
+        points_start_y=ys,
+        points_end_x=xs[1:] + xs[:1],
+        points_end_y=ys[1:] + ys[:1],
+        stroke_width=stroke_width,
+        layers=layers,
+    )
+
+
 # ---------------------------------------
 
-# Layers whose "solid" SOLIDREGIONs are imported ("npth" ones are board cutouts).
-# Layer 5/6 (F.Paste/B.Paste) are skipped — paste areas belong to pad definitions, not graphics.
-# Layer 99 (ComponentShapeLayer/LIBBODY) is not visible in EasyEDA; imported as F.CrtYd outline.
-# Layer 100 is skipped — decorative lead shapes.
-# Layer 101 is skipped — decorative pin circles.
-_SOLID_REGION_LAYERS = {3, 4, 13, 14, 99}
+# Bounding box: min x, min y, max x, max y
+Extent = tuple[float, float, float, float]
+
+
+def _extent(points: Iterable[Point]) -> Extent | None:
+    """Bounding box of the points; None without points."""
+    points = list(points)
+    if not points:
+        return None
+    xs, ys = [x for x, _ in points], [y for _, y in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _disc(center: Point, radius: float) -> list[Point]:
+    """Points of a circle farthest in -x, +x, -y and +y direction."""
+    x, y = center
+    return [(x - radius, y), (x + radius, y), (x, y - radius), (x, y + radius)]
+
+
+def _rotate(point: Point, angle: float) -> Point:
+    """Point rotated about the origin by a KiCad angle in degrees, which turns
+    counterclockwise on the screen (y down)."""
+    x, y = point
+    c, s = cos(radians(angle)), sin(radians(angle))
+    return x * c + y * s, y * c - x * s
+
+
+def _pad_extremes(pad: KiFootprintPad) -> list[Point]:
+    """Points whose bounding box is that of the pad shape."""
+    x, y = pad.pos_x, pad.pos_y
+    half_w, half_h = pad.width / 2, pad.height / 2
+    if pad.shape == "circle":
+        return _disc((x, y), half_w)
+    if pad.shape == "oval":
+        # Two half circles at the ends of the longer side
+        radius = min(half_w, half_h)
+        dx, dy = _rotate((half_w - radius, half_h - radius), pad.orientation)
+        return _disc((x + dx, y + dy), radius) + _disc((x - dx, y - dy), radius)
+    corners = [
+        (-half_w, -half_h),
+        (half_w, -half_h),
+        (half_w, half_h),
+        (-half_w, half_h),
+    ]
+    return [
+        (x + dx, y + dy)
+        for dx, dy in (_rotate(corner, pad.orientation) for corner in corners)
+    ]
+
+
+# KiCad library convention (KLC F5.3): the courtyard keeps 0.25 mm from pads
+# and body, lies on a 0.01 mm grid and is drawn with 0.05 mm lines
+_COURTYARD_CLEARANCE = 0.25
+_COURTYARD_GRID = 0.01
+_COURTYARD_WIDTH = 0.05
+# Distance from the courtyard and silkscreen to the center of the 1 mm high
+# reference above and value below
+_FIELD_OFFSET = 1.0
+
+
+def _courtyard(extent: Extent) -> Extent:
+    """Extent grown by the courtyard clearance and rounded out to its grid."""
+    min_x, min_y, max_x, max_y = extent
+    clearance, grid = _COURTYARD_CLEARANCE, _COURTYARD_GRID
+    # Rounding the quotient first keeps values on the grid from moving a step
+    return (
+        floor(round((min_x - clearance) / grid, 6)) * grid,
+        floor(round((min_y - clearance) / grid, 6)) * grid,
+        ceil(round((max_x + clearance) / grid, 6)) * grid,
+        ceil(round((max_y + clearance) / grid, 6)) * grid,
+    )
+
+
+# ---------------------------------------
+
+# EasyEDA describes the physical component on layers of its own: 99 the
+# package body, 100 the leads and 101 the polarity mark. Body regions become
+# F.Fab outlines with KiCad's 0.1 mm fab line width (KLC F5.2); all shapes on
+# the body layer bound the courtyard by their geometry, as KLC measures from
+# the body edge, not from the line drawing it. Leads and polarity marks are
+# not imported.
+_BODY_LAYER = 99
+_BODY_OUTLINE_WIDTH = 0.1
+_SKIPPED_LAYERS = {100, 101}
+# Line width of the polygon of custom pads
+_CUSTOM_PAD_STROKE = 0.1
+# Layers whose "solid" SOLIDREGIONs are imported as filled polygons; paste
+# areas (5/6) belong to the pads
+_FILLED_REGION_LAYERS = {3, 4, 13, 14}
+# "npth" regions on any layer are board cutouts
 _NPTH_REGION_LAYER = "Edge.Cuts"
-# Regions on these layers are exported as outlines, all others as filled polygons.
-_OUTLINE_REGION_LAYERS = ("F.CrtYd", _NPTH_REGION_LAYER)
+_NPTH_OUTLINE_WIDTH = 0.05
 
 
 def _parse_solid_region_path(
@@ -159,18 +264,22 @@ def _parse_solid_region_path(
 
 def _convert_solid_region(
     ee_region: EeFootprintSolidRegion, bbox_x: float, bbox_y: float
-) -> KiFootprintSolidRegion | None:
-    """Convert an EeFootprintSolidRegion to a closed KiFootprintSolidRegion.
+) -> KiFootprintSolidRegion | KiFootprintTrack | None:
+    """Convert an EeFootprintSolidRegion to a filled polygon or a closed outline.
 
-    NPTH regions are board cutouts (slots, notches) and go to Edge.Cuts on
-    any layer (EasyEDA uses 11, Multi-Layer). Returns None for regions on other
-    layers, malformed paths and contours with < 3 points.
+    NPTH regions are board cutouts (slots, notches) and become Edge.Cuts
+    outlines on any layer (EasyEDA uses 11, Multi-Layer); the package body
+    becomes an F.Fab outline. Returns None for regions on other layers,
+    malformed paths and contours with < 3 points.
     """
+    outline_width = None
     if ee_region.region_type == "npth":
-        layer = _NPTH_REGION_LAYER
-    elif (
-        ee_region.region_type == "solid" and ee_region.layer_id in _SOLID_REGION_LAYERS
-    ):
+        layer, outline_width = _NPTH_REGION_LAYER, _NPTH_OUTLINE_WIDTH
+    elif ee_region.region_type != "solid":
+        return None
+    elif ee_region.layer_id == _BODY_LAYER:
+        layer, outline_width = KI_LAYERS[_BODY_LAYER], _BODY_OUTLINE_WIDTH
+    elif ee_region.layer_id in _FILLED_REGION_LAYERS:
         layer = KI_LAYERS[ee_region.layer_id]
     else:
         return None
@@ -189,7 +298,21 @@ def _convert_solid_region(
 
     if points[0] != points[-1]:
         points.append(points[0])
+    if outline_width is not None:
+        return _track(points, layer, outline_width)
     return KiFootprintSolidRegion(layer=layer, points=points)
+
+
+class _OnLayer(Protocol):
+    layer_id: int
+
+
+_Shape = TypeVar("_Shape", bound=_OnLayer)
+
+
+def _imported(shapes: list[_Shape]) -> list[_Shape]:
+    """The shapes except those on skipped layers."""
+    return [shape for shape in shapes if shape.layer_id not in _SKIPPED_LAYERS]
 
 
 # ---------------------------------------
@@ -210,9 +333,75 @@ class ExporterFootprintKicad:
             fp_to_ki(point[1]) - self.input.bbox.y,
         )
 
+    def _add_extent(
+        self,
+        ee_layer_id: int,
+        layers: str,
+        points: Iterable[Point],
+        stroke_width: float = 0.0,
+    ) -> None:
+        """Record the extent of a shape drawn through the points: on its KiCad
+        layers including the stroke, and on the body layer as part of the
+        package body, whose edge the points describe."""
+        points = list(points)
+        extent = self._extents.setdefault(layers, [])
+        for point in points:
+            extent += _disc(point, stroke_width / 2)
+        if ee_layer_id == _BODY_LAYER:
+            self._component_points += points
+
+    def _add_track(self, ee_layer_id: int, track: KiFootprintTrack) -> None:
+        """Add a track to the footprint and record its extent."""
+        points = zip(
+            track.points_start_x + track.points_end_x,
+            track.points_start_y + track.points_end_y,
+        )
+        self._add_extent(ee_layer_id, track.layers, points, track.stroke_width)
+        self.output.tracks.append(track)
+
+    def _text_extremes(self, ee_text: EeFootprintText) -> list[Point]:
+        """Extreme points of the glyph strokes EasyEDA renders for the text,
+        or its anchor if the strokes are missing or malformed."""
+        try:
+            subpaths = parse_svg_path(ee_text.text_path)
+        except ValueError as e:
+            logging.debug(f"Text {ee_text.text!r} without usable strokes: {e}")
+            subpaths = []
+        points = [point for subpath in subpaths for point in subpath.extremes()]
+        anchor = (
+            ee_text.center_x - self.input.bbox.x,
+            ee_text.center_y - self.input.bbox.y,
+        )
+        return [self._ki_point(point) for point in points] or [anchor]
+
+    def _place_courtyard_and_fields(self) -> None:
+        """Courtyard around pads, holes, vias and package body; reference
+        above and value below it and the silkscreen, %R in its center."""
+        component = _extent(self._component_points)
+        courtyard = None
+        if component is not None:
+            courtyard = _courtyard(component)
+            corner, opposite = courtyard[:2], courtyard[2:]
+            self.output.rectangles.append(
+                _rectangle(corner, opposite, "F.CrtYd", _COURTYARD_WIDTH)
+            )
+            self._extents["F.CrtYd"] = [corner, opposite]
+        fields = _extent(
+            self._extents.get("F.CrtYd", []) + self._extents.get("F.SilkS", [])
+        ) or (0.0, 0.0, 0.0, 0.0)
+        min_x, min_y, max_x, max_y = courtyard or fields
+        center = ((min_x + max_x) / 2, (min_y + max_y) / 2)
+        self.output.reference_pos = (center[0], fields[1] - _FIELD_OFFSET)
+        self.output.value_pos = (center[0], fields[3] + _FIELD_OFFSET)
+        self.output.fab_reference_pos = center
+
     def generate_kicad_footprint(self) -> None:
         bbox_x_px = self.input.bbox.x_px
         bbox_y_px = self.input.bbox.y_px
+        # Points spanning the shapes per KiCad layer
+        self._extents: dict[str, list[Point]] = {}
+        # Points spanning the copper of pads, holes, vias and the package body
+        self._component_points: list[Point] = []
 
         ki_info = KiFootprintInfo(
             name=self.input.info.name,
@@ -287,6 +476,7 @@ class ExporterFootprintKicad:
                 )
                 ki_pad.number = normalized
 
+            outline = _pad_extremes(ki_pad)
             if ki_pad.shape == "custom":
                 try:
                     points = parse_svg_points(ee_pad.points)
@@ -307,19 +497,28 @@ class ExporterFootprintKicad:
                     ki_pad.orientation = 0
 
                     # Generate polygon with coordinates relative to the base pad's position.
+                    outline = [self._ki_point(point) for point in points]
                     path = "".join(
                         "(xy {:.6f} {:.6f})".format(x - ki_pad.pos_x, y - ki_pad.pos_y)
-                        for x, y in map(self._ki_point, points)
+                        for x, y in outline
                     )
                     ki_pad.polygon = (
                         "\n\t\t(primitives \n\t\t\t(gr_poly \n\t\t\t\t(pts"
-                        f" {path}\n\t\t\t\t) \n\t\t\t\t(width 0.1) \n\t\t\t)\n\t\t)\n\t"
+                        f" {path}\n\t\t\t\t) \n\t\t\t\t(width {_CUSTOM_PAD_STROKE})"
+                        " \n\t\t\t)\n\t\t)\n\t"
                     )
+                    # The polygon's stroke is copper too
+                    outline = [
+                        disc_point
+                        for point in outline
+                        for disc_point in _disc(point, _CUSTOM_PAD_STROKE / 2)
+                    ]
 
+            self._component_points += outline
             self.output.pads.append(ki_pad)
 
         # For tracks
-        for ee_track in self.input.tracks:
+        for ee_track in _imported(self.input.tracks):
             try:
                 points = parse_svg_points(ee_track.points)
             except ValueError as e:
@@ -328,12 +527,13 @@ class ExporterFootprintKicad:
             if len(points) < 2:
                 logging.warning(f"Skipping track with {len(points)} point(s)")
                 continue
-            self.output.tracks.append(
+            self._add_track(
+                ee_track.layer_id,
                 _track(
                     [self._ki_point(point) for point in points],
                     _layer(ee_track.layer_id),
                     max(ee_track.stroke_width, 0.01),
-                )
+                ),
             )
 
         # For holes
@@ -343,7 +543,9 @@ class ExporterFootprintKicad:
                 pos_y=ee_hole.center_y - self.input.bbox.y,
                 size=ee_hole.radius * 2,
             )
-
+            self._component_points += _disc(
+                (ki_hole.pos_x, ki_hole.pos_y), ee_hole.radius
+            )
             self.output.holes.append(ki_hole)
 
         # For Vias
@@ -354,11 +556,13 @@ class ExporterFootprintKicad:
                 size=ee_via.radius * 2,
                 diameter=ee_via.diameter,
             )
-
+            self._component_points += _disc(
+                (ki_via.pos_x, ki_via.pos_y), ee_via.diameter / 2
+            )
             self.output.vias.append(ki_via)
 
         # For circles
-        for ee_circle in self.input.circles:
+        for ee_circle in _imported(self.input.circles):
             ki_circle = KiFootprintCircle(
                 cx=ee_circle.cx - self.input.bbox.x,
                 cy=ee_circle.cy - self.input.bbox.y,
@@ -369,49 +573,40 @@ class ExporterFootprintKicad:
             )
             ki_circle.end_x = ki_circle.cx + ee_circle.radius
             ki_circle.end_y = ki_circle.cy
+            self._add_extent(
+                ee_circle.layer_id,
+                ki_circle.layers,
+                _disc((ki_circle.cx, ki_circle.cy), ee_circle.radius),
+                ki_circle.stroke_width,
+            )
             self.output.circles.append(ki_circle)
 
         # For rectangles
-        for ee_rectangle in self.input.rectangles:
-            ki_rectangle = KiFootprintRectangle(
-                layers=_layer(ee_rectangle.layer_id),
-                stroke_width=max(ee_rectangle.stroke_width, 0.01),
+        for ee_rectangle in _imported(self.input.rectangles):
+            corner = (
+                ee_rectangle.x - self.input.bbox.x,
+                ee_rectangle.y - self.input.bbox.y,
             )
-
-            start_x = ee_rectangle.x - self.input.bbox.x
-            start_y = ee_rectangle.y - self.input.bbox.y
-            width = ee_rectangle.width
-            height = ee_rectangle.height
-
-            ki_rectangle.points_start_x = [
-                start_x,
-                start_x + width,
-                start_x + width,
-                start_x,
-            ]
-            ki_rectangle.points_start_y = [
-                start_y,
-                start_y,
-                start_y + height,
-                start_y + height,
-            ]
-            ki_rectangle.points_end_x = [
-                start_x + width,
-                start_x + width,
-                start_x,
-                start_x,
-            ]
-            ki_rectangle.points_end_y = [
-                start_y,
-                start_y + height,
-                start_y + height,
-                start_y,
-            ]
-
+            opposite = (
+                corner[0] + ee_rectangle.width,
+                corner[1] + ee_rectangle.height,
+            )
+            ki_rectangle = _rectangle(
+                corner,
+                opposite,
+                _layer(ee_rectangle.layer_id),
+                max(ee_rectangle.stroke_width, 0.01),
+            )
+            self._add_extent(
+                ee_rectangle.layer_id,
+                ki_rectangle.layers,
+                [corner, opposite],
+                ki_rectangle.stroke_width,
+            )
             self.output.rectangles.append(ki_rectangle)
 
         # For arcs
-        for ee_arc in self.input.arcs:
+        for ee_arc in _imported(self.input.arcs):
             try:
                 subpaths = parse_svg_path(ee_arc.path)
             except ValueError as e:
@@ -423,6 +618,12 @@ class ExporterFootprintKicad:
             layers = _layer(ee_arc.layer_id)
             stroke_width = max(ee_arc.stroke_width, 0.01)
             for subpath in subpaths:
+                self._add_extent(
+                    ee_arc.layer_id,
+                    layers,
+                    map(self._ki_point, subpath.extremes()),
+                    stroke_width,
+                )
                 # Segments between circular arcs, each run flattened to a track
                 runs = [[subpath.start]]
                 for start, segment in subpath.walk():
@@ -454,7 +655,7 @@ class ExporterFootprintKicad:
                 ]
 
         # For texts
-        for ee_text in self.input.texts:
+        for ee_text in _imported(self.input.texts):
             ki_text = KiFootprintText(
                 pos_x=ee_text.center_x - self.input.bbox.x,
                 pos_y=ee_text.center_y - self.input.bbox.y,
@@ -472,13 +673,25 @@ class ExporterFootprintKicad:
                 else ki_text.layers
             )
             ki_text.mirror = " mirror" if ki_text.layers[0] == "B" else ""
+            if ee_text.is_displayed:
+                self._add_extent(
+                    ee_text.layer_id,
+                    ki_text.layers,
+                    self._text_extremes(ee_text),
+                    ki_text.thickness,
+                )
             self.output.texts.append(ki_text)
 
         # For solid regions
         for ee_region in self.input.solid_regions:
             ki_region = _convert_solid_region(ee_region, bbox_x_px, bbox_y_px)
-            if ki_region is not None:
+            if isinstance(ki_region, KiFootprintSolidRegion):
+                self._add_extent(ee_region.layer_id, ki_region.layer, ki_region.points)
                 self.output.solid_regions.append(ki_region)
+            elif ki_region is not None:
+                self._add_track(ee_region.layer_id, ki_region)
+
+        self._place_courtyard_and_fields()
 
     def get_ki_footprint(self) -> KiFootprint:
         return self.output
@@ -503,16 +716,15 @@ class ExporterFootprintKicad:
                 component_type=("smd" if ki.info.fp_type == "smd" else "through_hole")
             )
 
-        # Get y_min and y_max to place reference and value text
-        y_low = min((pad.pos_y for pad in ki.pads), default=0)
-        y_high = max((pad.pos_y for pad in ki.pads), default=0)
-
-        ki_lib += KI_REFERENCE.format(pos_x=0.0, pos_y=y_low - 4)
-
-        ki_lib += KI_PACKAGE_VALUE.format(
-            package_name=ki.info.name, pos_x=0.0, pos_y=y_high + 4
+        ki_lib += KI_REFERENCE.format(
+            pos_x=ki.reference_pos[0], pos_y=ki.reference_pos[1]
         )
-        ki_lib += KI_FAB_REF
+        ki_lib += KI_PACKAGE_VALUE.format(
+            package_name=ki.info.name, pos_x=ki.value_pos[0], pos_y=ki.value_pos[1]
+        )
+        ki_lib += KI_FAB_REF.format(
+            pos_x=ki.fab_reference_pos[0], pos_y=ki.fab_reference_pos[1]
+        )
 
         if ki.info.lcsc_id:
             ki_lib += f'\t(property "LCSC Part" "{ki.info.lcsc_id}")\n'
@@ -553,20 +765,8 @@ class ExporterFootprintKicad:
             ki_lib += KI_TEXT.format(**vars(text))
 
         for region in ki.solid_regions:
-            if region.layer in _OUTLINE_REGION_LAYERS:
-                pts = region.points
-                for i in range(len(pts) - 1):
-                    ki_lib += KI_LINE.format(
-                        start_x=pts[i][0],
-                        start_y=pts[i][1],
-                        end_x=pts[i + 1][0],
-                        end_y=pts[i + 1][1],
-                        layers=region.layer,
-                        stroke_width=0.05,
-                    )
-            else:
-                pts_str = " ".join(f"(xy {x:.6f} {y:.6f})" for x, y in region.points)
-                ki_lib += KI_FP_POLY.format(pts=pts_str, layer=region.layer)
+            pts_str = " ".join(f"(xy {x:.6f} {y:.6f})" for x, y in region.points)
+            ki_lib += KI_FP_POLY.format(pts=pts_str, layer=region.layer)
 
         if ki.model_3d is not None:
             ki_lib += KI_MODEL_3D.format(

@@ -14,6 +14,7 @@ from easyeda2kicad.easyeda.svg_path_parser import (
     SvgCubic,
     SvgLine,
     SvgSubpath,
+    parse_svg_font_size,
     parse_svg_numbers,
     parse_svg_path,
     parse_svg_points,
@@ -238,3 +239,16 @@ def test_nearly_circular_arc_becomes_the_circle_through_start_middle_end() -> No
 
 def test_elliptical_arc_has_no_circle() -> None:
     assert _arc("M 0 0 A 10 5 0 0 1 20 0").circle() is None
+
+
+@pytest.mark.parametrize(
+    ("text", "size"), [("9pt", 12.0), (" 12px ", 12.0), ("7.5", 7.5)]
+)
+def test_font_size_in_user_units(text: str, size: float) -> None:
+    assert parse_svg_font_size(text) == pytest.approx(size)
+
+
+@pytest.mark.parametrize("text", ["", "pt", "0pt", "-1", "9em", "9 9"])
+def test_invalid_font_size_is_rejected(text: str) -> None:
+    with pytest.raises(ValueError):
+        parse_svg_font_size(text)

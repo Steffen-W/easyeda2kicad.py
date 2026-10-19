@@ -332,9 +332,10 @@ SOLIDREGION~99~~M 3976.4252 3009.7242 L 3979.5748 3009.7242 L 3979.5748 3012.873
 - Path uses SVG format: `M x y` (move), `L x y` (line), `H x` (horizontal), `V y` (vertical), `Z` (close)
 - Converted to KiCad `fp_poly` (filled solid polygon)
 - Layers 3/4 (F.SilkS/B.SilkS), 13/14 (F.Fab/B.Fab): imported as filled `fp_poly`
-- Layer 99 (ComponentShapeLayer/LIBBODY): not visible in EasyEDA; imported as unfilled `fp_line` outline on `F.CrtYd`
+- Layer 99 (ComponentShapeLayer): the package body, not visible in EasyEDA; imported as unfilled `fp_line` outline on `F.Fab` (0.1 mm)
+- Type "npth" on any layer: board cutout; imported as unfilled `fp_line` outline on `Edge.Cuts` (0.05 mm)
 - Layers 5/6 skipped — paste areas belong to pad definitions
-- Layers 100/101 skipped — decorative lead/polarity shapes
+- Layers 100/101 skipped — lead and polarity shapes of the component
 
 ---
 
@@ -391,8 +392,8 @@ mm = easyeda_units * 10 * 0.0254
 
 **Common stroke_width values:**
 
-- 1 EE unit → 0.254 mm (typical silkscreen/courtyard line)
-- 3 EE units → 0.762 mm (thick courtyard/fabrication line)
+- 1 EE unit → 0.254 mm (typical silkscreen line)
+- 3 EE units → 0.762 mm (thick silkscreen/fabrication line)
 
 ---
 
@@ -416,6 +417,28 @@ mm = easyeda_units * 10 * 0.0254
 | 14  | BottomAssembly         | B.Fab       | Back fabrication                         |
 | 15  | Mechanical             | Dwgs.User   | Mechanical drawings                      |
 | 19  | 3DModel                | -           | 3D model layer                           |
-| 99  | ComponentShapeLayer    | F.CrtYd     | Component body                           |
-| 100 | LeadShapeLayer         | (skipped)   | Decorative lead shapes — not imported    |
-| 101 | ComponentPolarityLayer | (skipped)   | Decorative polarity marks — not imported |
+| 99  | ComponentShapeLayer    | F.Fab       | Package body (outline)                   |
+| 100 | LeadShapeLayer         | (skipped)   | Lead shapes — no shape imported          |
+| 101 | ComponentPolarityLayer | (skipped)   | Polarity marks — no shape imported       |
+
+---
+
+## Courtyard and Fields
+
+EasyEDA has no courtyard layer, so the exporter generates one following the
+KiCad library conventions ([KLC F5.3](https://klc.kicad.org/footprint/f5/f5.3/)):
+
+- **Courtyard**: one `F.CrtYd` rectangle around all pads, holes, vias and the
+  package body (all shapes on layer 99), grown by 0.25 mm, rounded outwards to
+  a 0.01 mm grid and drawn with 0.05 mm lines. The clearance counts from the
+  copper edge of pads (custom pads including the line of their polygon) and
+  from the body edge, not from the line drawing it. Footprints without any of
+  these get no courtyard.
+- **Reference** (`F.SilkS`): text center 1 mm above the courtyard and all
+  visible front silkscreen shapes and texts, aligned with the courtyard center.
+- **Value** (`F.Fab`): text center 1 mm below them.
+- **`%R`** (`F.Fab`): in the center of the courtyard.
+
+Pads count by shape and rotation; lines, circles, arcs and texts by their
+geometry including half the line width. For texts this is the glyph strokes
+EasyEDA stores with each text.

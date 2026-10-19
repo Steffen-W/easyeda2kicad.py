@@ -396,6 +396,23 @@ def parse_svg_points(text: str) -> list[Point]:
     return list(zip(numbers[::2], numbers[1::2]))
 
 
+def parse_svg_font_size(text: str) -> float:
+    """Font size in user units (px) of an SVG font-size: a number in user
+    units, "px" or "pt" (4/3 px).
+
+    Raises ValueError for any other text and for sizes that are not positive.
+    """
+    value, scale = text.strip(), 1.0
+    if value.endswith("pt"):
+        value, scale = value[:-2], 4 / 3
+    elif value.endswith("px"):
+        value = value[:-2]
+    numbers = parse_svg_numbers(value)
+    if len(numbers) != 1 or numbers[0] <= 0:
+        raise ValueError(f"invalid font size {text.strip()!r}")
+    return numbers[0] * scale
+
+
 def _reflect(control: Point | None, current: Point) -> Point:
     """First control point of a smooth curve (S, T): the previous control
     point mirrored at the current point, or the current point itself."""

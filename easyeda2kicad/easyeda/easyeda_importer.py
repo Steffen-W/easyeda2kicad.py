@@ -41,6 +41,7 @@ from .parameters_easyeda import (
     EeSymbolPath,
     EeSymbolPin,
     EeSymbolText,
+    ee_font_size,
     EeSymbolPinClock,
     EeSymbolPinDot,
     EeSymbolPinDotBis,
@@ -348,23 +349,16 @@ def add_easyeda_arc(arc_data: str, ee_symbol: EeSymbol) -> None:
 def add_easyeda_text(text_data: str, ee_symbol: EeSymbol) -> None:
     # Format: T~type~x~y~rotation~color~font~font_size~stroke_width~baseline~text_anchor~role~text~display~...
     parts = text_data.split("~")
-    if len(parts) < 13 or not parts[12]:
+    if len(parts) < 13 or not parts[12] or parts[13:14] == ["0"]:
         return
-    font_size_str = parts[7]
-    try:
-        if "pt" in font_size_str:
-            font_size_mm = float(font_size_str.replace("pt", "")) * 0.3528
-        else:
-            font_size_mm = float(font_size_str) * 0.3528
-    except ValueError:
-        font_size_mm = 1.27
     ee_symbol.texts.append(
         EeSymbolText(
             text=parts[12],
             pos_x=_safe_float(parts[2]),
             pos_y=_safe_float(parts[3]),
             rotation=_safe_float(parts[4]),
-            font_size=round(font_size_mm, 3),
+            font_size=ee_font_size(parts[7]),
+            text_anchor=parts[10],
         )
     )
 
