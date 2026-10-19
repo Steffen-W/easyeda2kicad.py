@@ -2,12 +2,19 @@ from __future__ import annotations
 
 # Global imports
 import logging
-import re
-from math import acos, cos, isnan, pi, sin, sqrt
+from math import ceil, copysign, degrees, isnan
 from pathlib import Path
 
 # Local imports
 from ..easyeda.parameters_easyeda import EeFootprint, EeFootprintSolidRegion
+from ..easyeda.svg_path_parser import (
+    SvgPathEllipticalArc,
+    SvgPathMoveTo,
+    parse_svg_args,
+    parse_svg_path,
+    split_svg_path,
+    svg_arc_geometry,
+)
 from .parameters_kicad_footprint import (
     KI_ARC,
     KI_CIRCLE,
@@ -46,18 +53,6 @@ from .parameters_kicad_footprint import (
 # ---------------------------------------
 
 
-def to_radians(n: float) -> float:
-    return (n / 180.0) * pi
-
-
-def to_degrees(n: float) -> float:
-    return (n / pi) * 180.0
-
-
-# Elliptical arc implementation based on the SVG specification notes
-# https://www.w3.org/TR/SVG11/implnote.html#ArcConversionEndpointToCenter
-
-
 def compute_arc(
     start_x: float,
     start_y: float,
@@ -69,76 +64,20 @@ def compute_arc(
     end_x: float,
     end_y: float,
 ) -> tuple[float, float, float]:
-    # Compute the half distance between the current and the final point
-    dx2 = (start_x - end_x) / 2.0
-    dy2 = (start_y - end_y) / 2.0
-
-    # Convert angle from degrees to radians
-    angle = to_radians(angle % 360.0)
-    cos_angle = cos(angle)
-    sin_angle = sin(angle)
-
-    # Step 1 : Compute (x1, y1)
-    x1 = cos_angle * dx2 + sin_angle * dy2
-    y1 = -sin_angle * dx2 + cos_angle * dy2
-
-    # Ensure radii are large enough
-    radius_x = abs(radius_x)
-    radius_y = abs(radius_y)
-    rx_sq = radius_x * radius_x
-    ry_sq = radius_y * radius_y
-    x1_sq = x1 * x1
-    y1_sq = y1 * y1
-
-    # Check that radii are large enough; scale up if not (per SVG spec §10.7)
-    radii_check = x1_sq / rx_sq + y1_sq / ry_sq if rx_sq != 0 and ry_sq != 0 else 0
-    if radii_check > 1:
-        radius_x = sqrt(radii_check) * radius_x
-        radius_y = sqrt(radii_check) * radius_y
-        rx_sq = radius_x * radius_x
-        ry_sq = radius_y * radius_y
-
-    # Step 2 : Compute (cx1, cy1)
-    sign = -1 if large_arc_flag == sweep_flag else 1
-    sq = 0.0
-    if rx_sq * y1_sq + ry_sq * x1_sq > 0:
-        sq = (rx_sq * ry_sq - rx_sq * y1_sq - ry_sq * x1_sq) / (
-            rx_sq * y1_sq + ry_sq * x1_sq
-        )
-    sq = max(sq, 0)
-    coef = sign * sqrt(sq)
-    cx1 = coef * ((radius_x * y1) / radius_y)
-    cy1 = coef * -((radius_y * x1) / radius_x) if radius_x != 0 else 0
-
-    # Step 3 : Compute (cx, cy) from (cx1, cy1)
-    sx2 = (start_x + end_x) / 2.0
-    sy2 = (start_y + end_y) / 2.0
-    cx = sx2 + (cos_angle * cx1 - sin_angle * cy1)
-    cy = sy2 + (sin_angle * cx1 + cos_angle * cy1)
-
-    # Step 4 : Compute the angle_extent (dangle)
-    ux = (x1 - cx1) / radius_x if radius_x != 0 else 0
-    uy = (y1 - cy1) / radius_y if radius_y != 0 else 0
-    vx = (-x1 - cx1) / radius_x if radius_x != 0 else 0
-    vy = (-y1 - cy1) / radius_y if radius_y != 0 else 0
-
-    # Compute the angle extent
-    n = sqrt((ux * ux + uy * uy) * (vx * vx + vy * vy))
-    p = ux * vx + uy * vy
-    sign = -1 if (ux * vy - uy * vx) < 0 else 1
-    if n != 0:
-        angle_extent = to_degrees(sign * acos(max(-1.0, min(1.0, p / n))))
-    else:
-        angle_extent = 360 + 359
-    if not (sweep_flag) and angle_extent > 0:
-        angle_extent -= 360
-    elif sweep_flag and angle_extent < 0:
-        angle_extent += 360
-
-    angleExtent_sign = 1 if angle_extent < 0 else -1
-    angle_extent = (abs(angle_extent) % 360) * angleExtent_sign
-
-    return cx, cy, angle_extent
+    """Center and angular extent (degrees, KiCad orientation) of an SVG arc."""
+    arc = svg_arc_geometry(
+        sx=start_x,
+        sy=start_y,
+        ex=end_x,
+        ey=end_y,
+        rx=radius_x,
+        ry=radius_y,
+        x_rotation_deg=angle,
+        large_arc=large_arc_flag,
+        sweep=sweep_flag,
+    )
+    extent = degrees(arc.sweep_angle)
+    return arc.center_x, arc.center_y, -copysign(abs(extent) % 360, extent)
 
 
 # ---------------------------------------
@@ -192,22 +131,18 @@ def angle_to_ki(rotation: float | str) -> float:
 
 # ---------------------------------------
 
-
-def rotate(x: float, y: float, degrees: float) -> tuple[float, float]:
-    radians = (degrees / 180) * 2 * pi
-    new_x = x * cos(radians) - y * sin(radians)
-    new_y = x * sin(radians) + y * cos(radians)
-    return new_x, new_y
-
-
-# ---------------------------------------
-
-# Layers on which SOLIDREGION is imported.
+# Layers whose "solid" SOLIDREGIONs are imported ("npth" ones are board cutouts).
 # Layer 5/6 (F.Paste/B.Paste) are skipped — paste areas belong to pad definitions, not graphics.
 # Layer 99 (ComponentShapeLayer/LIBBODY) is not visible in EasyEDA; imported as F.CrtYd outline.
 # Layer 100 is skipped — decorative lead shapes.
 # Layer 101 is skipped — decorative pin circles.
 _SOLID_REGION_LAYERS = {3, 4, 13, 14, 99}
+_NPTH_REGION_LAYER = "Edge.Cuts"
+# Regions on these layers are exported as outlines, all others as filled polygons.
+_OUTLINE_REGION_LAYERS = ("F.CrtYd", _NPTH_REGION_LAYER)
+
+# Maximum angle per line segment when flattening arcs
+_ARC_SEGMENT_DEG = 10.0
 
 
 def _parse_solid_region_path(
@@ -215,39 +150,64 @@ def _parse_solid_region_path(
 ) -> list[tuple[float, float]]:
     """Convert an EasyEDA SVG path string to a list of (x, y) mm points.
 
-    Handles M, L, H, V, Z commands. Arc commands (A) are approximated by
-    their endpoint only — sufficient for simple rounded shapes.
+    Supports what EasyEDA writes: one subpath of absolute M, L, H, V and A
+    commands, each with any number of coordinate sets (extra pairs after M are
+    line-tos, as in SVG), optionally closed by a final Z. Arcs are flattened
+    into segments of at most _ARC_SEGMENT_DEG. Consecutive duplicate points
+    are dropped.
     Subtracts bbox in pixel space before converting to mm to avoid
     float rounding artifacts from subtracting two independently rounded values.
+    Raises ValueError for anything else: other or relative commands, several
+    subpaths and the malformed arguments rejected by parse_svg_args.
     """
     points: list[tuple[float, float]] = []
     cur_x = cur_y = 0.0
+    closed = False
 
-    for token in re.split(r"(?=[MLHVAZmlhvaz])", path.strip()):
-        token = token.strip()
-        if not token:
-            continue
-        cmd = token[0]
-        args = [a for a in re.split(r"[,\s]+", token[1:].strip()) if a]
+    def add_point() -> None:
+        point = (fp_to_ki(cur_x - bbox_x_px), fp_to_ki(cur_y - bbox_y_px))
+        if not points or points[-1] != point:
+            points.append(point)
 
-        if cmd == "M" and len(args) >= 2:
-            cur_x, cur_y = float(args[0]), float(args[1])
-            points.append((fp_to_ki(cur_x - bbox_x_px), fp_to_ki(cur_y - bbox_y_px)))
-        elif cmd == "L" and len(args) >= 2:
-            cur_x, cur_y = float(args[0]), float(args[1])
-            points.append((fp_to_ki(cur_x - bbox_x_px), fp_to_ki(cur_y - bbox_y_px)))
-        elif cmd == "H" and len(args) >= 1:
-            cur_x = float(args[0])
-            points.append((fp_to_ki(cur_x - bbox_x_px), fp_to_ki(cur_y - bbox_y_px)))
-        elif cmd == "V" and len(args) >= 1:
-            cur_y = float(args[0])
-            points.append((fp_to_ki(cur_x - bbox_x_px), fp_to_ki(cur_y - bbox_y_px)))
-        elif cmd == "A" and len(args) >= 7:
-            # Approximate arc by its endpoint only
-            cur_x, cur_y = float(args[5]), float(args[6])
-            points.append((fp_to_ki(cur_x - bbox_x_px), fp_to_ki(cur_y - bbox_y_px)))
-        elif cmd == "Z" and points and points[0] != points[-1]:
-            points.append(points[0])
+    for cmd, text in split_svg_path(path):
+        if cmd not in "MLHVAZ":
+            raise ValueError(f"path command '{cmd}' is not supported")
+        coordinate_sets = parse_svg_args(cmd, text)
+        if closed:
+            raise ValueError("Z must be the last path command")
+        if (cmd == "M") == bool(points):
+            raise ValueError("path must consist of exactly one subpath starting with M")
+        if cmd == "Z":
+            closed = True
+        for values in coordinate_sets:
+            if cmd == "H":
+                cur_x = values[0]
+            elif cmd == "V":
+                cur_y = values[0]
+            else:
+                end_x, end_y = values[-2], values[-1]
+                # SVG draws an arc with a zero radius as a straight line
+                if cmd == "A" and values[0] and values[1]:
+                    arc = svg_arc_geometry(
+                        sx=cur_x,
+                        sy=cur_y,
+                        ex=end_x,
+                        ey=end_y,
+                        rx=values[0],
+                        ry=values[1],
+                        x_rotation_deg=values[2],
+                        large_arc=bool(values[3]),
+                        sweep=bool(values[4]),
+                    )
+                    # Rounding keeps float noise (90.0000001°) from adding a segment
+                    steps = ceil(
+                        round(abs(degrees(arc.sweep_angle)) / _ARC_SEGMENT_DEG, 6)
+                    )
+                    for step in range(1, steps):
+                        cur_x, cur_y = arc.point(step / steps)
+                        add_point()
+                cur_x, cur_y = end_x, end_y
+            add_point()
 
     return points
 
@@ -255,17 +215,26 @@ def _parse_solid_region_path(
 def _convert_solid_region(
     ee_region: EeFootprintSolidRegion, bbox_x: float, bbox_y: float
 ) -> KiFootprintSolidRegion | None:
-    """Convert an EeFootprintSolidRegion to a KiFootprintSolidRegion.
+    """Convert an EeFootprintSolidRegion to a closed KiFootprintSolidRegion.
 
-    Returns None if the layer is not imported or the path has < 3 points.
+    NPTH regions are board cutouts (slots, notches) and go to Edge.Cuts on
+    any layer (EasyEDA uses 11, Multi-Layer). Returns None for regions on other
+    layers, malformed paths and contours with < 3 points.
     """
-    if ee_region.layer_id not in _SOLID_REGION_LAYERS:
-        return None
-    if ee_region.region_type not in ("solid", "npth"):
+    if ee_region.region_type == "npth":
+        layer = _NPTH_REGION_LAYER
+    elif (
+        ee_region.region_type == "solid" and ee_region.layer_id in _SOLID_REGION_LAYERS
+    ):
+        layer = KI_LAYERS[ee_region.layer_id]
+    else:
         return None
 
-    layer = KI_LAYERS.get(ee_region.layer_id, "F.SilkS")
-    points = _parse_solid_region_path(ee_region.path, bbox_x, bbox_y)
+    try:
+        points = _parse_solid_region_path(ee_region.path, bbox_x, bbox_y)
+    except ValueError as e:
+        logging.warning(f"SOLIDREGION on layer {ee_region.layer_id}: skipping, {e}")
+        return None
     if len(points) < 3:
         logging.warning(
             f"SOLIDREGION on layer {ee_region.layer_id}: "
@@ -273,6 +242,8 @@ def _convert_solid_region(
         )
         return None
 
+    if points[0] != points[-1]:
+        points.append(points[0])
     return KiFootprintSolidRegion(layer=layer, points=points)
 
 
@@ -494,44 +465,50 @@ class ExporterFootprintKicad:
 
         # For arcs
         for ee_arc in self.input.arcs:
-            arc_path = (
-                ee_arc.path.replace(",", " ").replace("M ", "M").replace("A ", "A")
+            arc_path = parse_svg_path(ee_arc.path)
+            if (
+                len(arc_path) < 2
+                or not isinstance(arc_path[0], SvgPathMoveTo)
+                or not isinstance(arc_path[1], SvgPathEllipticalArc)
+            ):
+                logging.warning("Skipping arc with unexpected SVG path structure")
+                continue
+            svg_start, svg_arc = arc_path[0], arc_path[1]
+            start_x = fp_to_ki(svg_start.start_x) - self.input.bbox.x
+            start_y = fp_to_ki(svg_start.start_y) - self.input.bbox.y
+            end_x = fp_to_ki(svg_arc.end_x) - self.input.bbox.x
+            end_y = fp_to_ki(svg_arc.end_y) - self.input.bbox.y
+            rx = fp_to_ki(svg_arc.radius_x)
+            ry = fp_to_ki(svg_arc.radius_y)
+            layers = (
+                KI_LAYERS[ee_arc.layer_id] if ee_arc.layer_id in KI_LAYERS else "F.Fab"
             )
+            stroke_width = max(ee_arc.stroke_width, 0.01)
 
-            start_x_str, start_y_str = arc_path.split("A")[0][1:].split(" ", 1)
-            start_x = fp_to_ki(start_x_str) - self.input.bbox.x
-            start_y = fp_to_ki(start_y_str) - self.input.bbox.y
-
-            arc_parameters = arc_path.split("A")[1].replace("  ", " ")
-            (
-                svg_rx,
-                svg_ry,
-                x_axis_rotation,
-                large_arc,
-                sweep,
-                end_x_str,
-                end_y_str,
-            ) = arc_parameters.split(" ", 6)
-            rx, ry = rotate(fp_to_ki(svg_rx), fp_to_ki(svg_ry), 0)
-
-            end_x = fp_to_ki(end_x_str) - self.input.bbox.x
-            end_y = fp_to_ki(end_y_str) - self.input.bbox.y
-            if ry != 0:
-                cx, cy, extent = compute_arc(
-                    start_x,
-                    start_y,
-                    rx,
-                    ry,
-                    float(x_axis_rotation),
-                    large_arc == "1",
-                    sweep == "1",
-                    end_x,
-                    end_y,
+            # SVG draws an arc with a zero radius as a straight line
+            if rx == 0 or ry == 0:
+                self.output.tracks.append(
+                    KiFootprintTrack(
+                        points_start_x=[start_x],
+                        points_start_y=[start_y],
+                        points_end_x=[end_x],
+                        points_end_y=[end_y],
+                        stroke_width=stroke_width,
+                        layers=layers,
+                    )
                 )
-            else:
-                cx = 0.0
-                cy = 0.0
-                extent = 0.0
+                continue
+            cx, cy, extent = compute_arc(
+                start_x,
+                start_y,
+                rx,
+                ry,
+                svg_arc.x_axis_rotation,
+                svg_arc.flag_large_arc,
+                svg_arc.flag_sweep,
+                end_x,
+                end_y,
+            )
 
             ki_arc = KiFootprintArc(
                 start_x=cx,
@@ -539,12 +516,8 @@ class ExporterFootprintKicad:
                 end_x=end_x,
                 end_y=end_y,
                 angle=extent,
-                layers=(
-                    KI_LAYERS[ee_arc.layer_id]
-                    if ee_arc.layer_id in KI_LAYERS
-                    else "F.Fab"
-                ),
-                stroke_width=max(ee_arc.stroke_width, 0.01),
+                layers=layers,
+                stroke_width=stroke_width,
             )
             self.output.arcs.append(ki_arc)
 
@@ -652,8 +625,7 @@ class ExporterFootprintKicad:
             ki_lib += KI_TEXT.format(**vars(text))
 
         for region in ki.solid_regions:
-            if region.layer == "F.CrtYd":
-                # Layer 99 (ComponentShapeLayer) has no fill in EasyEDA — emit as outline lines.
+            if region.layer in _OUTLINE_REGION_LAYERS:
                 pts = region.points
                 for i in range(len(pts) - 1):
                     ki_lib += KI_LINE.format(
@@ -661,7 +633,7 @@ class ExporterFootprintKicad:
                         start_y=pts[i][1],
                         end_x=pts[i + 1][0],
                         end_y=pts[i + 1][1],
-                        layers="F.CrtYd",
+                        layers=region.layer,
                         stroke_width=0.05,
                     )
             else:

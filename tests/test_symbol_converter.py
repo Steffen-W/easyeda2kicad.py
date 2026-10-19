@@ -28,6 +28,7 @@ from easyeda2kicad.kicad.export_kicad_symbol import (
     integrate_sub_units,
 )
 from easyeda2kicad.kicad.parameters_kicad_symbol import (
+    BEZIER_POLYLINE_SEGMENTS,
     KICAD_SYM_VERSION_20211014,
     KICAD_SYM_VERSION_20220914,
     KiPinStyle,
@@ -192,11 +193,25 @@ def test_convert_ee_paths_empty_warning(caplog: pytest.LogCaptureFixture) -> Non
     assert "no parseable points" in caplog.text
 
 
-def test_convert_ee_paths_unknown_token() -> None:
+def test_convert_ee_paths_unknown_token(caplog: pytest.LogCaptureFixture) -> None:
     path = _make_path("M 400 300 X 999 L 410 300")
-    polys, bezs = convert_ee_paths([path], BBOX)
+    with caplog.at_level(logging.WARNING):
+        polys, bezs = convert_ee_paths([path], BBOX)
     assert len(polys) == 1
     assert bezs == []
+    assert "'X' is not supported" in caplog.text
+
+
+def test_convert_ee_paths_compact_syntax_and_coordinate_sets() -> None:
+    compact, _ = convert_ee_paths([_make_path("M400 300 410 300L405 310Z")], BBOX)
+    spaced, _ = convert_ee_paths([_make_path("M 400 300 L 410 300 L 405 310 Z")], BBOX)
+    assert compact == spaced
+
+
+def test_convert_ee_paths_subpaths_are_separate_polygons() -> None:
+    path = _make_path("M 400 300 L 410 300 M 400 310 L 410 310")
+    polys, _ = convert_ee_paths([path], BBOX)
+    assert [p.points_number for p in polys] == [2, 2]
 
 
 def test_bezier_export_kicad7() -> None:
@@ -209,13 +224,16 @@ def test_bezier_export_kicad7() -> None:
 
 
 def test_bezier_export_fallback_old_version() -> None:
-    # KiCad < 20220914: falls back to (polyline ...) with just start + end
+    # KiCad < 20220914: falls back to a (polyline ...) along the curve
     path = _make_path("M 400 300 C 402 295 408 295 410 300")
     _, bezs = convert_ee_paths([path], BBOX)
     out = bezs[0].export(KICAD_SYM_VERSION_20211014)
     assert "(polyline" in out
     assert "(bezier" not in out
-    assert out.count("(xy ") == 2
+    points = bezs[0].approximate()
+    assert out.count("(xy ") == len(points) == BEZIER_POLYLINE_SEGMENTS + 1
+    assert points[0] == bezs[0].points[0] and points[-1] == bezs[0].points[-1]
+    assert points[len(points) // 2][1] != points[0][1]  # curve, not a chord
 
 
 # ---- convert_ee_polylines: fill_color closes polygon ----
@@ -275,17 +293,32 @@ def test_arc_invalid_structure(caplog: pytest.LogCaptureFixture) -> None:
     arc = _make_arc("M 400 300")  # only MoveTo, no EllipticalArc
     with caplog.at_level(logging.ERROR):
         result = convert_ee_arcs([arc], BBOX)
-    assert result == []
+    assert result == ([], [], [])
     assert "Can't convert this arc" in caplog.text
 
 
-def test_arc_zero_radius(caplog: pytest.LogCaptureFixture) -> None:
-    # A with radius_x=0 triggers the degenerate warning
-    arc = _make_arc("M 400 300 A 0 0 0 0 1 410 300")
+def test_arc_zero_radius_is_a_line() -> None:
+    arc = _make_arc("M 400 300 A 0 5 0 0 1 410 300")
+    arcs, circles, lines = convert_ee_arcs([arc], BBOX)
+    assert arcs == [] and circles == []
+    assert len(lines) == 1
+    assert lines[0].points == [[0.0, 0.0], [2.54, 0.0]]
+    assert not lines[0].is_closed
+
+
+def test_arc_with_invalid_flag_is_skipped(caplog: pytest.LogCaptureFixture) -> None:
+    arc = _make_arc("M 400 300 A 5 5 0 2 1 410 300")
     with caplog.at_level(logging.WARNING):
-        result = convert_ee_arcs([arc], BBOX)
-    assert result == []
-    assert "degenerate arc" in caplog.text
+        assert convert_ee_arcs([arc], BBOX) == ([], [], [])
+    assert "arc flags must be 0 or 1" in caplog.text
+
+
+def test_arc_with_compact_numbers() -> None:
+    arcs, _, _ = convert_ee_arcs([_make_arc("M400-300A5 5 0 0 1 410-300")], BBOX)
+    (spaced,), _, _ = convert_ee_arcs(
+        [_make_arc("M 400 -300 A 5 5 0 0 1 410 -300")], BBOX
+    )
+    assert arcs == [spaced]
 
 
 # ---- integrate_sub_units ----

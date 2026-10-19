@@ -1,11 +1,16 @@
 """Unit tests for footprint writer helper functions."""
 
 import math
+from pathlib import Path
 
 import pytest
 
-from easyeda2kicad.easyeda.easyeda_importer import _sanitize_footprint_name
+from easyeda2kicad.easyeda.easyeda_importer import (
+    EasyedaFootprintImporter,
+    _sanitize_footprint_name,
+)
 from easyeda2kicad.kicad.export_kicad_footprint import (
+    ExporterFootprintKicad,
     angle_to_ki,
     compute_arc,
     drill_to_ki,
@@ -137,6 +142,11 @@ class TestComputeArc:
         cx, cy, extent = compute_arc(0, 0, 0.01, 0.01, 0, False, True, 10, 0)
         assert math.isfinite(cx) and math.isfinite(cy) and math.isfinite(extent)
 
+    def test_zero_radius_is_rejected(self) -> None:
+        # SVG draws such an arc as a straight line, which has no center
+        with pytest.raises(ValueError, match="zero radius"):
+            compute_arc(0, 0, 0, 1, 0, False, True, 10, 0)
+
     def test_coincident_points_no_crash(self) -> None:
         # Start == end: degenerate case, just must not raise
         cx, cy, extent = compute_arc(1, 0, 1, 1, 0, False, True, 1, 0)
@@ -148,6 +158,51 @@ class TestComputeArc:
         d_start = math.sqrt((1 - cx) ** 2 + (0 - cy) ** 2)
         d_end = math.sqrt((1 - cx) ** 2 + (0 - cy) ** 2)
         assert abs(d_start - d_end) < TOL
+
+
+# ---------------------------------------------------------------------------
+# ARC export
+# ---------------------------------------------------------------------------
+
+
+def _export_arc(tmp_path: Path, path: str) -> str:
+    cad = {
+        "packageDetail": {
+            "title": "ARC",
+            "dataStr": {
+                "head": {"x": 400, "y": 300, "c_para": {"package": "ARC"}},
+                "shape": [f"ARC~1~3~~{path}~~gge1~0"],
+            },
+        }
+    }
+    footprint = EasyedaFootprintImporter(cad).get_footprint()
+    output = tmp_path / "ARC.kicad_mod"
+    ExporterFootprintKicad(footprint).export(str(output), model_3d_path="")
+    return output.read_text(encoding="utf-8")
+
+
+class TestArcExport:
+    def test_compact_numbers(self, tmp_path: Path) -> None:
+        compact = _export_arc(tmp_path, "M400-300A10 10 0 0 1 410-290")
+        spaced = _export_arc(tmp_path, "M 400 -300 A 10 10 0 0 1 410 -290")
+        assert "(fp_arc" in compact
+        assert compact == spaced
+
+    def test_zero_radius_is_a_line(self, tmp_path: Path) -> None:
+        # SVG draws an arc with a zero radius as a straight line
+        content = _export_arc(tmp_path, "M 400 300 A 0 10 0 0 1 410 300")
+        assert "(fp_arc" not in content
+        assert "(fp_line (start 0.00 0.00) (end 2.54 0.00) (layer F.SilkS)" in content
+
+    @pytest.mark.parametrize(
+        "path", ["M 400 300 A 10 10 0 2 1 410 300", "M 400 300 A 10 10 0 0 1 410"]
+    )
+    def test_malformed_arc_is_skipped(
+        self, tmp_path: Path, path: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        content = _export_arc(tmp_path, path)
+        assert "(fp_arc" not in content
+        assert "Skipping arc" in caplog.text
 
 
 # ---------------------------------------------------------------------------

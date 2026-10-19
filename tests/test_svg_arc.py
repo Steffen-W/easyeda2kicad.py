@@ -1,10 +1,16 @@
-"""Unit tests for the _svg_arc_mid_point helper in export_kicad_symbol."""
+"""Unit tests for svg_arc_geometry, checked at the mid-point of the arc."""
 
 import math
+from typing import Any
 
 import pytest
 
-from easyeda2kicad.kicad.export_kicad_symbol import _svg_arc_mid_point
+from easyeda2kicad.easyeda.svg_path_parser import svg_arc_geometry
+
+
+def _svg_arc_mid_point(**kwargs: Any) -> tuple[float, float]:
+    return svg_arc_geometry(**kwargs).point(0.5)
+
 
 # Tolerance for floating-point comparisons (in SVG pixel units)
 TOL = 1e-9
@@ -24,7 +30,7 @@ def on_ellipse(
 
 
 class TestSvgArcMidPoint:
-    """Tests for _svg_arc_mid_point: the result must lie on the source ellipse
+    """The mid-point must lie on the source ellipse
     and be geometrically between start and end on the correct arc segment."""
 
     # ------------------------------------------------------------------
@@ -135,8 +141,8 @@ class TestSvgArcMidPoint:
             x_rotation_deg=0.0,
             sweep=True,
         )
-        mx_small, my_small = _svg_arc_mid_point(**kwargs, large_arc=False)  # type: ignore[arg-type]
-        mx_large, my_large = _svg_arc_mid_point(**kwargs, large_arc=True)  # type: ignore[arg-type]
+        mx_small, my_small = _svg_arc_mid_point(**kwargs, large_arc=False)
+        mx_large, my_large = _svg_arc_mid_point(**kwargs, large_arc=True)
         assert (mx_small, my_small) != pytest.approx((mx_large, my_large), abs=1e-6)
 
     def test_large_arc_midpoint_on_ellipse(self) -> None:
@@ -239,35 +245,46 @@ class TestSvgArcMidPoint:
     # Rotation
     # ------------------------------------------------------------------
 
-    def test_rotated_arc_midpoint_on_ellipse(self) -> None:
-        """45°-rotated ellipse: mid-point lies on the rotated ellipse."""
-        rx, ry = 2.0, 1.0
-        phi = math.radians(45.0)
-        cos_phi, sin_phi = math.cos(phi), math.sin(phi)
+    @staticmethod
+    def _rotated_ellipse_point(theta_deg: float) -> tuple[float, float]:
+        """Point at parameter angle theta on the ellipse rx=2, ry=1 centred at
+        (3, -2) and rotated by 30°."""
+        theta, phi = math.radians(theta_deg), math.radians(30.0)
+        lx, ly = 2.0 * math.cos(theta), 1.0 * math.sin(theta)
+        return (
+            3.0 + math.cos(phi) * lx - math.sin(phi) * ly,
+            -2.0 + math.sin(phi) * lx + math.cos(phi) * ly,
+        )
 
-        # Start/end on the unrotated ellipse at θ=0° and θ=90°, then rotate
-        sx = cos_phi * rx
-        sy = sin_phi * rx
-        ex = -sin_phi * ry
-        ey = cos_phi * ry
-
-        mx, my = _svg_arc_mid_point(
+    @pytest.mark.parametrize(
+        ("large_arc", "sweep", "start_deg", "sweep_deg"),
+        [(False, True, 0.0, 90.0), (True, False, 0.0, -270.0)],
+    )
+    def test_rotated_arc_geometry(
+        self, large_arc: bool, sweep: bool, start_deg: float, sweep_deg: float
+    ) -> None:
+        """30°-rotated ellipse from θ=0° to θ=90°: center, radii, angles and
+        every point along the arc match the rotated ellipse."""
+        sx, sy = self._rotated_ellipse_point(0.0)
+        ex, ey = self._rotated_ellipse_point(90.0)
+        arc = svg_arc_geometry(
             sx=sx,
             sy=sy,
             ex=ex,
             ey=ey,
-            rx=rx,
-            ry=ry,
-            x_rotation_deg=45.0,
-            large_arc=False,
-            sweep=True,
+            rx=2.0,
+            ry=1.0,
+            x_rotation_deg=30.0,
+            large_arc=large_arc,
+            sweep=sweep,
         )
-
-        # The result must be finite and lie on the rotated ellipse.
-        # We verify finiteness here; the on_ellipse check requires the arc center,
-        # which is non-trivial to compute for a rotated ellipse. The geometric
-        # correctness for rotated arcs is covered by test_large_arc_midpoint_on_ellipse.
-        assert math.isfinite(mx) and math.isfinite(my)
+        assert (arc.center_x, arc.center_y) == pytest.approx((3.0, -2.0))
+        assert (arc.radius_x, arc.radius_y) == pytest.approx((2.0, 1.0))
+        assert math.degrees(arc.start_angle) == pytest.approx(start_deg, abs=1e-9)
+        assert math.degrees(arc.sweep_angle) == pytest.approx(sweep_deg)
+        for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+            expected = self._rotated_ellipse_point(start_deg + sweep_deg * fraction)
+            assert arc.point(fraction) == pytest.approx(expected)
 
     # ------------------------------------------------------------------
     # Degenerate / edge cases
@@ -316,7 +333,7 @@ class TestSvgArcMidPoint:
             large_arc=False,
             sweep=True,
         )
-        mx0, my0 = _svg_arc_mid_point(**args, x_rotation_deg=0.0)  # type: ignore[arg-type]
-        mx360, my360 = _svg_arc_mid_point(**args, x_rotation_deg=360.0)  # type: ignore[arg-type]
+        mx0, my0 = _svg_arc_mid_point(**args, x_rotation_deg=0.0)
+        mx360, my360 = _svg_arc_mid_point(**args, x_rotation_deg=360.0)
         assert abs(mx0 - mx360) < TOL
         assert abs(my0 - my360) < TOL

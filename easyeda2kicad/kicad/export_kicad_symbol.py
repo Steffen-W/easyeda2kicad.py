@@ -23,7 +23,13 @@ from ..easyeda.parameters_easyeda import (
     EeSymbolRectangle,
     EeSymbolText,
 )
-from ..easyeda.svg_path_parser import SvgPathEllipticalArc, SvgPathMoveTo
+from ..easyeda.svg_path_parser import (
+    SvgPathEllipticalArc,
+    SvgPathMoveTo,
+    parse_svg_args,
+    split_svg_path,
+    svg_arc_geometry,
+)
 from .parameters_kicad_symbol import (
     KICAD_SYM_VERSIONS_SORTED,
     KiPinStyle,
@@ -241,100 +247,20 @@ def convert_ee_ellipses(
     ]
 
 
-def _svg_arc_mid_point(
-    sx: float,
-    sy: float,
-    ex: float,
-    ey: float,
-    rx: float,
-    ry: float,
-    x_rotation_deg: float,
-    large_arc: bool,
-    sweep: bool,
-) -> tuple[float, float]:
-    """Return the parametric mid-point on an SVG arc.
-
-    Implements the SVG spec endpoint-to-center conversion
-    (https://www.w3.org/TR/SVG11/implnote.html#ArcConversionEndpointToCenter)
-    and evaluates the ellipse at θ_mid = θ_start + Δθ/2.
-    All coordinates are in the caller's coordinate system (SVG or KiCad).
-    """
-    phi = math.radians(x_rotation_deg % 360.0)
-    cos_phi = math.cos(phi)
-    sin_phi = math.sin(phi)
-
-    # Step 1: rotate midpoint of chord into ellipse-local frame
-    dx2 = (sx - ex) / 2.0
-    dy2 = (sy - ey) / 2.0
-    x1 = cos_phi * dx2 + sin_phi * dy2
-    y1 = -sin_phi * dx2 + cos_phi * dy2
-
-    # Ensure radii are positive and large enough
-    rx = abs(rx)
-    ry = abs(ry)
-    rx_sq = rx * rx
-    ry_sq = ry * ry
-    x1_sq = x1 * x1
-    y1_sq = y1 * y1
-    radii_scale = x1_sq / rx_sq + y1_sq / ry_sq if rx_sq and ry_sq else 0.0
-    if radii_scale > 1.0:
-        scale = math.sqrt(radii_scale)
-        rx *= scale
-        ry *= scale
-        rx_sq = rx * rx
-        ry_sq = ry * ry
-
-    # Step 2: compute center in ellipse-local frame
-    sign = -1.0 if large_arc == sweep else 1.0
-    num = max(0.0, rx_sq * ry_sq - rx_sq * y1_sq - ry_sq * x1_sq)
-    den = rx_sq * y1_sq + ry_sq * x1_sq
-    coef = sign * math.sqrt(num / den) if den > 0 else 0.0
-    cx1 = coef * (rx * y1 / ry)
-    cy1 = coef * -(ry * x1 / rx) if rx else 0.0
-
-    # Step 3: center in SVG frame
-    cx = cos_phi * cx1 - sin_phi * cy1 + (sx + ex) / 2.0
-    cy = sin_phi * cx1 + cos_phi * cy1 + (sy + ey) / 2.0
-
-    # Step 4: start angle and angular extent
-    def angle_between(ux: float, uy: float, vx: float, vy: float) -> float:
-        n = math.hypot(ux, uy) * math.hypot(vx, vy)
-        if n == 0:
-            return 0.0
-        cos_val = max(-1.0, min(1.0, (ux * vx + uy * vy) / n))
-        a = math.acos(cos_val)
-        if ux * vy - uy * vx < 0:
-            a = -a
-        return a
-
-    ux = (x1 - cx1) / rx if rx else 0.0
-    uy = (y1 - cy1) / ry if ry else 0.0
-    vx = (-x1 - cx1) / rx if rx else 0.0
-    vy = (-y1 - cy1) / ry if ry else 0.0
-
-    theta1 = angle_between(1.0, 0.0, ux, uy)
-    d_theta = angle_between(ux, uy, vx, vy)
-
-    if not sweep and d_theta > 0:
-        d_theta -= 2 * math.pi
-    elif sweep and d_theta < 0:
-        d_theta += 2 * math.pi
-
-    theta_mid = theta1 + d_theta / 2.0
-
-    # Evaluate ellipse at theta_mid (with rotation phi)
-    lx = rx * math.cos(theta_mid)
-    ly = ry * math.sin(theta_mid)
-    mid_x = cos_phi * lx - sin_phi * ly + cx
-    mid_y = sin_phi * lx + cos_phi * ly + cy
-    return mid_x, mid_y
+# EasyEDA stores full circles as arcs whose end lies just off the start; an end
+# closer than this share of the radius marks such a circle.
+_FULL_CIRCLE_ARC_GAP = 0.01
 
 
 def convert_ee_arcs(
     ee_arcs: list[EeSymbolArc],
     ee_bbox: EeSymbolBbox,
-) -> list[KiSymbolArc]:
-    kicad_arcs = []
+) -> tuple[list[KiSymbolArc], list[KiSymbolCircle], list[KiSymbolPolygon]]:
+    """Convert EasyEDA arcs to KiCad arcs, nearly closed ones to circles and
+    ones with a zero radius to lines."""
+    kicad_arcs: list[KiSymbolArc] = []
+    kicad_circles: list[KiSymbolCircle] = []
+    kicad_lines: list[KiSymbolPolygon] = []
     for ee_arc in ee_arcs:
         if (
             len(ee_arc.path) < 2
@@ -343,56 +269,76 @@ def convert_ee_arcs(
         ):
             logging.error("Can't convert this arc: unexpected SVG path structure")
             continue
-        elif float(ee_arc.path[1].radius_y) == 0 or float(ee_arc.path[1].radius_x) == 0:
-            logging.warning(
-                f"Skipping degenerate arc (radius_x={ee_arc.path[1].radius_x},"
-                f" radius_y={ee_arc.path[1].radius_y})"
+        svg_arc = ee_arc.path[1]
+        rx, ry = svg_arc.radius_x, svg_arc.radius_y
+        svg_sx, svg_sy = ee_arc.path[0].start_x, ee_arc.path[0].start_y
+        svg_ex, svg_ey = svg_arc.end_x, svg_arc.end_y
+
+        # SVG draws an arc with a zero radius as a straight line
+        if rx == 0 or ry == 0:
+            kicad_lines.append(
+                KiSymbolPolygon(
+                    points=[
+                        [px_to_mm(svg_sx - ee_bbox.x), -px_to_mm(svg_sy - ee_bbox.y)],
+                        [px_to_mm(svg_ex - ee_bbox.x), -px_to_mm(svg_ey - ee_bbox.y)],
+                    ],
+                    points_number=2,
+                    is_closed=False,
+                )
             )
             continue
-        else:
-            svg_arc = ee_arc.path[1]
-            svg_sx = float(ee_arc.path[0].start_x)
-            svg_sy = float(ee_arc.path[0].start_y)
-            svg_ex = float(svg_arc.end_x)
-            svg_ey = float(svg_arc.end_y)
 
-            svg_mid_x, svg_mid_y = _svg_arc_mid_point(
-                sx=svg_sx,
-                sy=svg_sy,
-                ex=svg_ex,
-                ey=svg_ey,
-                rx=float(svg_arc.radius_x),
-                ry=float(svg_arc.radius_y),
-                x_rotation_deg=float(svg_arc.x_axis_rotation),
-                large_arc=svg_arc.flag_large_arc,
-                sweep=svg_arc.flag_sweep,
+        svg_mid_x, svg_mid_y = svg_arc_geometry(
+            sx=svg_sx,
+            sy=svg_sy,
+            ex=svg_ex,
+            ey=svg_ey,
+            rx=rx,
+            ry=ry,
+            x_rotation_deg=svg_arc.x_axis_rotation,
+            large_arc=svg_arc.flag_large_arc,
+            sweep=svg_arc.flag_sweep,
+        ).point(0.5)
+
+        is_full_circle = (
+            svg_arc.flag_large_arc
+            and math.isclose(rx, ry, rel_tol=1e-6)
+            and math.hypot(svg_ex - svg_sx, svg_ey - svg_sy)
+            <= _FULL_CIRCLE_ARC_GAP * rx
+        )
+        if is_full_circle:
+            # The mid point lies opposite the start, so the center is halfway.
+            kicad_circles.append(
+                KiSymbolCircle(
+                    pos_x=px_to_mm((svg_sx + svg_mid_x) / 2 - ee_bbox.x),
+                    pos_y=-px_to_mm((svg_sy + svg_mid_y) / 2 - ee_bbox.y),
+                    radius=px_to_mm(
+                        math.hypot(svg_mid_x - svg_sx, svg_mid_y - svg_sy) / 2
+                    ),
+                    background_filling=ee_arc.fill_color,
+                )
             )
+            continue
 
-            # Transform to KiCad coordinates (shift by bbox origin, flip Y-axis).
-            # Start and end are swapped: the Y-flip mirrors the arc, reversing the
-            # traversal direction, which would move the mid-point to the wrong side
-            # of the chord. Swapping start/end preserves the correct winding.
-            start_x = px_to_mm(svg_ex - ee_bbox.x)
-            start_y = -px_to_mm(svg_ey - ee_bbox.y)
-            middle_x = px_to_mm(svg_mid_x - ee_bbox.x)
-            middle_y = -px_to_mm(svg_mid_y - ee_bbox.y)
-            end_x = px_to_mm(svg_sx - ee_bbox.x)
-            end_y = -px_to_mm(svg_sy - ee_bbox.y)
-
-            ki_arc = KiSymbolArc(
-                start_x=start_x,
-                start_y=start_y,
-                middle_x=middle_x,
-                middle_y=middle_y,
-                end_x=end_x,
-                end_y=end_y,
+        # Transform to KiCad coordinates (shift by bbox origin, flip Y-axis).
+        # Start and end are swapped: the Y-flip mirrors the arc, reversing the
+        # traversal direction, which would move the mid-point to the wrong side
+        # of the chord. Swapping start/end preserves the correct winding.
+        kicad_arcs.append(
+            KiSymbolArc(
+                start_x=px_to_mm(svg_ex - ee_bbox.x),
+                start_y=-px_to_mm(svg_ey - ee_bbox.y),
+                middle_x=px_to_mm(svg_mid_x - ee_bbox.x),
+                middle_y=-px_to_mm(svg_mid_y - ee_bbox.y),
+                end_x=px_to_mm(svg_sx - ee_bbox.x),
+                end_y=-px_to_mm(svg_sy - ee_bbox.y),
                 # angle_start != angle_end (default 0.0) disables background fill.
                 angle_start=1.0,
                 angle_end=0.0,
             )
-            kicad_arcs.append(ki_arc)
+        )
 
-    return kicad_arcs
+    return kicad_arcs, kicad_circles, kicad_lines
 
 
 def convert_ee_polylines(
@@ -447,10 +393,11 @@ def convert_ee_paths(
 
     Mixed paths (L + C interspersed) are split: M/L segments become polygon
     sub-paths and each C/Q becomes a separate KiSymbolBezier, all sharing
-    endpoints so the segments stay visually connected.
+    endpoints so the segments stay visually connected. Other and malformed
+    commands are skipped with a warning.
 
-    KiSymbolBezier requires KiCad format >= 20220914; older versions fall back
-    to a straight line in KiSymbolBezier.export().
+    KiSymbolBezier requires KiCad format >= 20220914; for older versions
+    KiSymbolBezier.export() approximates the curve with a polyline.
     """
     polygons: list[KiSymbolPolygon] = []
     beziers: list[KiSymbolBezier] = []
@@ -459,13 +406,12 @@ def convert_ee_paths(
         return [px_to_mm(ex - ee_bbox.x), -px_to_mm(ey - ee_bbox.y)]
 
     for ee_path in ee_paths:
-        raw_pts = ee_path.paths.split()
         n_before = len(polygons) + len(beziers)
 
         poly_pts: list[list[float]] = []  # current polygon sub-path (KiCad mm)
         cur_x = 0.0  # current pen position in EE pixels
         cur_y = 0.0
-        first_pt: list[float] = []  # for Z close
+        subpath_start: tuple[float, float] | None = None  # for Z close
 
         def _flush_poly() -> None:
             if len(poly_pts) >= 2:
@@ -479,59 +425,60 @@ def convert_ee_paths(
                 )
             poly_pts.clear()
 
-        # Minimal SVG path parser: https://www.w3.org/TR/SVG11/paths.html#PathElement
-        idx = 0
-        while idx < len(raw_pts):
-            cmd = raw_pts[idx]
-            if cmd in ("M", "L"):
-                cur_x = float(raw_pts[idx + 1])
-                cur_y = float(raw_pts[idx + 2])
-                pt = _ki(cur_x, cur_y)
-                poly_pts.append(pt)
-                if cmd == "M":
-                    first_pt = pt
-                idx += 3
-            elif cmd == "Z":
-                if poly_pts and first_pt:
-                    poly_pts.append(first_pt)
-                idx += 1
-            elif cmd == "C":
-                x1, y1 = float(raw_pts[idx + 1]), float(raw_pts[idx + 2])
-                x2, y2 = float(raw_pts[idx + 3]), float(raw_pts[idx + 4])
-                x, y = float(raw_pts[idx + 5]), float(raw_pts[idx + 6])
-                _flush_poly()
-                beziers.append(
-                    KiSymbolBezier(
-                        points=[_ki(cur_x, cur_y), _ki(x1, y1), _ki(x2, y2), _ki(x, y)]
-                    )
-                )
-                cur_x, cur_y = x, y
-                poly_pts.append(_ki(cur_x, cur_y))  # anchor for next M/L/C segment
-                idx += 7
-            elif cmd == "Q":
-                qx1, qy1 = float(raw_pts[idx + 1]), float(raw_pts[idx + 2])
-                qx, qy = float(raw_pts[idx + 3]), float(raw_pts[idx + 4])
-                # Degree elevation: quadratic → cubic
-                cx1 = cur_x + 2 / 3 * (qx1 - cur_x)
-                cy1 = cur_y + 2 / 3 * (qy1 - cur_y)
-                cx2 = qx + 2 / 3 * (qx1 - qx)
-                cy2 = qy + 2 / 3 * (qy1 - qy)
-                _flush_poly()
-                beziers.append(
-                    KiSymbolBezier(
-                        points=[
-                            _ki(cur_x, cur_y),
-                            _ki(cx1, cy1),
-                            _ki(cx2, cy2),
-                            _ki(qx, qy),
-                        ]
-                    )
-                )
-                cur_x, cur_y = qx, qy
+        for cmd, text in split_svg_path(ee_path.paths):
+            try:
+                if cmd not in "MLCQZ":
+                    raise ValueError(f"path command '{cmd}' is not supported")
+                coordinate_sets = parse_svg_args(cmd, text)
+            except ValueError as e:
+                logging.warning(f"PT path: skipping command: {e}")
+                continue
+            if cmd == "Z" and poly_pts and subpath_start:
+                cur_x, cur_y = subpath_start
                 poly_pts.append(_ki(cur_x, cur_y))
-                idx += 5
-            else:
-                idx += 1  # unknown cmd or stray coordinate
+            for i, values in enumerate(coordinate_sets):
+                if cmd == "C":
+                    x1, y1, x2, y2, x, y = values
+                    _flush_poly()
+                    beziers.append(
+                        KiSymbolBezier(
+                            points=[
+                                _ki(cur_x, cur_y),
+                                _ki(x1, y1),
+                                _ki(x2, y2),
+                                _ki(x, y),
+                            ]
+                        )
+                    )
+                    cur_x, cur_y = x, y
+                    poly_pts.append(_ki(cur_x, cur_y))  # anchor for next segment
+                elif cmd == "Q":
+                    qx1, qy1, qx, qy = values
+                    # Degree elevation: quadratic → cubic
+                    cx1 = cur_x + 2 / 3 * (qx1 - cur_x)
+                    cy1 = cur_y + 2 / 3 * (qy1 - cur_y)
+                    cx2 = qx + 2 / 3 * (qx1 - qx)
+                    cy2 = qy + 2 / 3 * (qy1 - qy)
+                    _flush_poly()
+                    beziers.append(
+                        KiSymbolBezier(
+                            points=[
+                                _ki(cur_x, cur_y),
+                                _ki(cx1, cy1),
+                                _ki(cx2, cy2),
+                                _ki(qx, qy),
+                            ]
+                        )
+                    )
+                    cur_x, cur_y = qx, qy
+                    poly_pts.append(_ki(cur_x, cur_y))
+                else:
+                    cur_x, cur_y = values
+                    # Coordinate pairs after the first one of M are line-tos
+                    if cmd == "M" and i == 0:
+                        _flush_poly()
+                        subpath_start = (cur_x, cur_y)
+                    poly_pts.append(_ki(cur_x, cur_y))
 
         _flush_poly()
 
@@ -550,7 +497,8 @@ def convert_ee_texts(
             text=t.text,
             pos_x=px_to_mm(t.pos_x - ee_bbox.x),
             pos_y=-px_to_mm(t.pos_y - ee_bbox.y),
-            rotation=t.rotation,
+            # EasyEDA rotates clockwise (y down), KiCad counter-clockwise (y up).
+            rotation=-t.rotation % 360,
             font_size=t.font_size,
         )
         for t in ee_texts
@@ -586,8 +534,11 @@ def convert_to_kicad(
             ee_rectangles=ee_symbol.rectangles, ee_bbox=snapped_bbox
         ),
         circles=convert_ee_circles(ee_circles=ee_symbol.circles, ee_bbox=snapped_bbox),
-        arcs=convert_ee_arcs(ee_arcs=ee_symbol.arcs, ee_bbox=snapped_bbox),
     )
+    kicad_symbol.arcs, arc_circles, arc_lines = convert_ee_arcs(
+        ee_arcs=ee_symbol.arcs, ee_bbox=snapped_bbox
+    )
+    kicad_symbol.circles += arc_circles
     kicad_symbol.circles += convert_ee_ellipses(
         ee_ellipses=ee_symbol.ellipses, ee_bbox=snapped_bbox
     )
@@ -595,7 +546,7 @@ def convert_to_kicad(
     path_polygons, path_beziers = convert_ee_paths(
         ee_paths=ee_symbol.paths, ee_bbox=snapped_bbox
     )
-    kicad_symbol.polygons = path_polygons
+    kicad_symbol.polygons = path_polygons + arc_lines
     kicad_symbol.beziers = path_beziers
     kicad_symbol.polygons += convert_ee_polylines(
         ee_polylines=ee_symbol.polylines, ee_bbox=snapped_bbox
@@ -689,7 +640,7 @@ class ExporterSymbolKicad:
         return integrate_sub_units(
             main_symbol=main_content,
             sub_symbols=sub_contents,
-            component_name=self.input.info.name,
+            component_name=self.output.lib_id,
         )
 
     def save_to_lib(
@@ -700,7 +651,7 @@ class ExporterSymbolKicad:
         Returns False if the symbol already exists and overwrite is False.
         """
         already_exists = id_already_in_symbol_lib(
-            lib_path=lib_path, component_name=self.input.info.name
+            lib_path=lib_path, component_name=self.output.lib_id
         )
         if already_exists and not overwrite:
             return False
@@ -708,7 +659,7 @@ class ExporterSymbolKicad:
         content = self.export(footprint_lib_name=footprint_lib_name)
         write_component_in_symbol_lib_file(
             lib_path=lib_path,
-            component_name=self.input.info.name,
+            component_name=self.output.lib_id,
             component_content=content,
             version=self.version,
         )

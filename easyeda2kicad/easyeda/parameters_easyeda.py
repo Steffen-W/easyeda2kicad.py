@@ -552,7 +552,7 @@ class EeFootprintArc:
 @dataclass
 class EeFootprintSolidRegion:
     layer_id: int
-    path: str  # SVG path string (M/L/H/V/A/Z commands)
+    path: str  # SVG path string
     region_type: str  # "solid", "cutout", "npth"
 
     def __post_init__(self) -> None:

@@ -109,8 +109,9 @@ class TestApiHelpers:
 
     def test_get_component_requires_exact_match(self) -> None:
         api = FakeApi([_result("C152200"), _result("C15220")])
-        assert api.get_jlcpcb_component("c15220")["lcsc"] == "C15220"
-        assert api.get_jlcpcb_component("15220")["lcsc"] == "C15220"
+        for lcsc_id in ("c15220", "15220"):
+            part = api.get_jlcpcb_component(lcsc_id)
+            assert part is not None and part["lcsc"] == "C15220"
         assert api.get_jlcpcb_component("C1") is None
 
     def test_get_component_raises_when_jlcpcb_unreachable(self) -> None:

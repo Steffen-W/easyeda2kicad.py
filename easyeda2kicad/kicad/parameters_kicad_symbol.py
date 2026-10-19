@@ -453,6 +453,10 @@ class KiSymbolArc:
 
 
 # ---------------- BEZIER CURVE ----------------
+# Polyline segments per curve in formats without (bezier ...)
+BEZIER_POLYLINE_SEGMENTS = 8
+
+
 @dataclass
 class KiSymbolBezier:
     points: list[list[float]] = field(default_factory=list)
@@ -470,15 +474,28 @@ class KiSymbolBezier:
               (stroke (width {lw}) (type default))
               (fill (type {fill}))
             )"""
-        # Format < 20220914 has no (bezier ...) — emit straight line start→end
-        start = self.points[0] if self.points else [0, 0]
-        end = self.points[-1] if len(self.points) > 1 else start
+        # Formats before 20220914 have no (bezier ...).
+        fmt_pts = " ".join(f"(xy {x:.2f} {y:.2f})" for x, y in self.approximate())
         return f"""
             (polyline
-              (pts (xy {start[0]:.2f} {start[1]:.2f}) (xy {end[0]:.2f} {end[1]:.2f}))
+              (pts {fmt_pts})
               (stroke (width {lw}) (type default))
               (fill (type {fill}))
             )"""
+
+    def approximate(self) -> list[list[float]]:
+        """Points along the cubic Bézier curve [start, c1, c2, end]."""
+        if len(self.points) != 4:
+            raise ValueError(f"cubic Bézier needs 4 points, got {len(self.points)}")
+        (x0, y0), (x1, y1), (x2, y2), (x3, y3) = self.points
+        points = []
+        for i in range(BEZIER_POLYLINE_SEGMENTS + 1):
+            t = i / BEZIER_POLYLINE_SEGMENTS
+            a, b, c, d = (1 - t) ** 3, 3 * (1 - t) ** 2 * t, 3 * (1 - t) * t**2, t**3
+            points.append(
+                [a * x0 + b * x1 + c * x2 + d * x3, a * y0 + b * y1 + c * y2 + d * y3]
+            )
+        return points
 
 
 # ---------------- TEXT ----------------
@@ -497,10 +514,11 @@ class KiSymbolText:
     text: str = ""
     pos_x: float = 0.0
     pos_y: float = 0.0
-    rotation: float = 0.0
+    rotation: float = 0.0  # degrees, counter-clockwise
     font_size: float = 1.27  # mm
 
     def export(self, version: int = KICAD_SYM_VERSION_20211014) -> str:
+        # Unlike pins and properties, symbol text angles are in tenths of a degree.
         return """
             (text "{text}"
               (at {pos_x:.2f} {pos_y:.2f} {rotation:.0f})
@@ -509,7 +527,7 @@ class KiSymbolText:
             text=self.text.replace('"', '\\"'),
             pos_x=self.pos_x,
             pos_y=self.pos_y,
-            rotation=self.rotation,
+            rotation=self.rotation * 10,
             font_size=self.font_size,
         )
 
@@ -525,6 +543,11 @@ class KiSymbol:
     polygons: list[KiSymbolPolygon] = field(default_factory=lambda: [])
     beziers: list[KiSymbolBezier] = field(default_factory=lambda: [])
     texts: list[KiSymbolText] = field(default_factory=lambda: [])
+
+    @property
+    def lib_id(self) -> str:
+        """Symbol name as written to and looked up in the library."""
+        return sanitize_fields(self.info.name)
 
     def export_handler(
         self, version: int = KICAD_SYM_VERSION_20211014
@@ -575,7 +598,7 @@ class KiSymbol:
             ),
             "  ",
         ).format(
-            library_id=sanitize_fields(self.info.name),
+            library_id=self.lib_id,
             sym_attrs=sym_attrs,
             symbol_properties=textwrap.indent(
                 textwrap.dedent("".join(sym_info)), "  " * 2
