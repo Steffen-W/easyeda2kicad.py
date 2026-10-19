@@ -189,7 +189,7 @@ rz = 360 - model_3d.rotation.z
 
 ```
 (model "${EASYEDA2KICAD}/DC-IN-TH_L14.4-W9.0-H11.0.wrl"
-  (offset (xyz -3.650 2.200 -4.000))
+  (offset (xyz -3.65 2.2 -4))
   (scale (xyz 1 1 1))
   (rotate (xyz 0 0 90))
 )

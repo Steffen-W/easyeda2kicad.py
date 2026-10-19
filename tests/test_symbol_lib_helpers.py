@@ -175,13 +175,13 @@ def test_read_version_missing_version_field(tmp_path: Path) -> None:
 
 
 def test_read_version_file_not_found() -> None:
-    """Non-existent file falls back to the oldest known version."""
-    assert read_symbol_lib_version("/nonexistent/path/test.kicad_sym") == 20211014
+    """A new library gets the KiCad 8 format."""
+    assert read_symbol_lib_version("/nonexistent/path/test.kicad_sym") == 20231120
 
 
 def test_read_version_none() -> None:
-    """None as lib_path falls back to the oldest known version."""
-    assert read_symbol_lib_version(None) == 20211014
+    """A new library gets the KiCad 8 format."""
+    assert read_symbol_lib_version(None) == 20231120
 
 
 # ---- sanitize_fields ----

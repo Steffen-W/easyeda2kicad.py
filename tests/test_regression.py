@@ -53,10 +53,12 @@ class TestRegression:
 
         for line in lines:
             # Skip timestamp lines
-            if "tedit" in line.lower() or "date" in line.lower():
+            if "date" in line.lower():
                 continue
-            # Skip version comments
-            if "easyeda2kicad.py" in line and "version" in line.lower():
+            # Skip the version of easyeda2kicad
+            if "generator_version" in line or (
+                "easyeda2kicad.py" in line and "version" in line.lower()
+            ):
                 continue
             # Skip "Generated with" lines
             if "generated with" in line.lower():

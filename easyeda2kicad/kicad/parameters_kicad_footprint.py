@@ -4,65 +4,84 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .._version import GENERATOR_URL, __version__
+
 # ---------------------------- FOOTPRINT PART ----------------------------
 
-KI_MODULE_INFO = "(module {package_lib}:{package_name} (layer F.Cu) (tedit {edit})\n"
-KI_DESCRIPTION = (
-    '\t(descr "{datasheet_link}, generated with easyeda2kicad.py on {date}")\n'
-)
-KI_TAGS_INFO = '\t(tags "{tag}")\n'
-KI_FP_TYPE = "\t(attr {component_type})\n"
-KI_REFERENCE = (
-    "\t(fp_text reference REF** (at {pos_x:.3f} {pos_y:.3f}) (layer F.SilkS)\n\t\t(effects"
-    " (font (size 1 1) (thickness 0.15)))\n\t)\n"
-)
-KI_PACKAGE_VALUE = (
-    "\t(fp_text value {package_name} (at {pos_x:.3f} {pos_y:.3f}) (layer F.Fab)\n\t\t(effects"
-    " (font (size 1 1) (thickness 0.15)))\n\t)\n"
-)
-KI_FAB_REF = (
-    "\t(fp_text user %R (at {pos_x:.3f} {pos_y:.3f}) (layer F.Fab)\n\t\t(effects (font (size 1 1)"
-    " (thickness 0.15)))\n\t)\n"
-)
-KI_END_FILE = ")"
+# .kicad_mod file format of KiCad 8, read by KiCad 8 and later
+KI_FOOTPRINT_VERSION = 20240108
+# Font of the reference, the value and the ${REFERENCE} text on F.Fab
+_FIELD_FONT = "(font (size 1 1) (thickness 0.15))"
 
-KI_PAD_SIZE_MIN = 0.001
-KI_PAD = (
-    "\t(pad {number} {type} {shape} (at {pos_x:.2f} {pos_y:.2f} {orientation:.2f})"
-    " (size {width:.3f} {height:.3f}) (layers {layers}){drill}{polygon})\n"
-)
-KI_LINE = (
-    "\t(fp_line (start {start_x:.2f} {start_y:.2f}) (end {end_x:.2f} {end_y:.2f})"
-    " (layer {layers}) (width {stroke_width:.2f}))\n"
-)
-KI_HOLE = (
-    '\t(pad "" np_thru_hole circle (at {pos_x:.2f} {pos_y:.2f}) (size {size:.2f}'
-    " {size:.2f}) (drill {size:.2f}) (layers *.Cu *.Mask))\n"
-)
-KI_VIA = (
-    '\t(pad "" thru_hole circle (at {pos_x:.2f} {pos_y:.2f}) (size {diameter:.2f}'
-    " {diameter:.2f}) (drill {size:.2f}) (layers *.Cu *.Paste *.Mask))\n"
-)
-KI_CIRCLE = (
-    "\t(fp_circle (center {cx:.2f} {cy:.2f}) (end {end_x:.2f} {end_y:.2f}) (layer"
-    " {layers}) (width {stroke_width:.2f}))\n"
-)
-KI_ARC = (
-    "\t(fp_arc (start {start_x:.2f} {start_y:.2f}) (end {end_x:.2f} {end_y:.2f}) (angle"
-    " {angle:.2f}) (layer {layers}) (width {stroke_width:.2f}))\n"
-)
-KI_TEXT = (
-    "\t(fp_text user {text} (at {pos_x:.2f} {pos_y:.2f} {orientation:.2f}) (layer"
-    " {layers}){display}\n\t\t(effects (font (size {font_size:.2f} {font_size:.2f})"
-    " (thickness {thickness:.2f})) (justify left{mirror}))\n\t)\n"
-)
-KI_FP_POLY = '\t(fp_poly (pts {pts}) (stroke (width 0) (type solid)) (fill solid) (layer "{layer}"))\n'
 
-KI_MODEL_3D = (
-    '\t(model "{file_3d}"\n\t\t(offset (xyz {pos_x:.3f} {pos_y:.3f}'
-    " {pos_z:.3f}))\n\t\t(scale (xyz 1 1 1))\n\t\t(rotate (xyz {rot_x:.0f} {rot_y:.0f}"
-    " {rot_z:.0f}))\n\t)\n"
+def ki_number(value: float) -> str:
+    """Number without trailing zeros, rounded to 4 decimals: 0.1 µm for
+    lengths, far below any manufacturing tolerance, which drops the noise of
+    converting EasyEDA's inch-based values (2.4803 × 0.254 mm = 0.629996 mm
+    is 0.63 mm)."""
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    return "0" if text == "-0" else text
+
+
+# Escape sequences of KiCad strings
+_STRING_ESCAPES = str.maketrans(
+    {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 )
+
+
+def ki_string(text: str) -> str:
+    """Quoted KiCad string."""
+    return f'"{text.translate(_STRING_ESCAPES)}"'
+
+
+def _xy(x: float, y: float) -> str:
+    return f"{ki_number(x)} {ki_number(y)}"
+
+
+def _at(x: float, y: float, angle: float = 0.0) -> str:
+    """Position; the angle only if the element is rotated."""
+    return f"(at {_xy(x, y)}{f' {ki_number(angle)}' if angle else ''})"
+
+
+def _layer(layer: str) -> str:
+    return f"(layer {ki_string(layer)})"
+
+
+def _layers(layers: str) -> str:
+    return f"(layers {' '.join(map(ki_string, layers.split()))})"
+
+
+def _stroke(width: float) -> str:
+    return f"(stroke (width {ki_number(width)}) (type solid))"
+
+
+def ki_property(
+    name: str, value: str, x: float, y: float, layer: str, hidden: bool
+) -> str:
+    """Footprint property such as Reference and Value."""
+    return (
+        f"\t(property {ki_string(name)} {ki_string(value)} {_at(x, y)}"
+        f" {_layer(layer)}{' (hide yes)' if hidden else ''}"
+        f" (effects {_FIELD_FONT}))\n"
+    )
+
+
+def ki_fab_reference(x: float, y: float) -> str:
+    """Text on F.Fab showing the reference."""
+    return (
+        f'\t(fp_text user "${{REFERENCE}}" {_at(x, y)} {_layer("F.Fab")}'
+        f" (effects {_FIELD_FONT}))\n"
+    )
+
+
+def ki_footprint_header(name: str) -> str:
+    return (
+        f"(footprint {ki_string(name)}\n"
+        f"\t(version {KI_FOOTPRINT_VERSION})\n"
+        f"\t(generator {ki_string(GENERATOR_URL)})\n"
+        f"\t(generator_version {ki_string(__version__)})\n"
+        f"\t{_layer('F.Cu')}\n"
+    )
 
 
 # ---------------------------------------
@@ -121,9 +140,36 @@ class KiFootprintPad:
     height: float
     layers: str
     number: str
-    drill: str
+    # Drill size along x and y; a round hole if they are equal
+    drill: Optional[tuple[float, float]]
     orientation: float
-    polygon: str
+    # Copper polygon of custom pads, relative to the pad position
+    polygon: list[tuple[float, float]] = field(default_factory=list)
+    polygon_width: float = 0.0
+
+    def export(self) -> str:
+        drill = ""
+        if self.drill is not None:
+            drill_x, drill_y = self.drill
+            drill = (
+                f" (drill {ki_number(drill_x)})"
+                if drill_x == drill_y
+                else f" (drill oval {_xy(drill_x, drill_y)})"
+            )
+        primitives = ""
+        if self.polygon:
+            pts = " ".join(f"(xy {_xy(x, y)})" for x, y in self.polygon)
+            primitives = (
+                " (options (clearance outline) (anchor circle))"
+                f" (primitives (gr_poly (pts {pts})"
+                f" (width {ki_number(self.polygon_width)}) (fill yes)))"
+            )
+        return (
+            f"\t(pad {ki_string(self.number)} {self.type} {self.shape}"
+            f" {_at(self.pos_x, self.pos_y, self.orientation)}"
+            f" (size {_xy(self.width, self.height)}){drill}"
+            f" {_layers(self.layers)}{primitives})\n"
+        )
 
 
 # ---------------- TRACK ----------------
@@ -136,6 +182,18 @@ class KiFootprintTrack:
     stroke_width: float = 0
     layers: str = ""
 
+    def export(self) -> str:
+        return "".join(
+            f"\t(fp_line (start {_xy(start_x, start_y)}) (end {_xy(end_x, end_y)})"
+            f" {_stroke(self.stroke_width)} {_layer(self.layers)})\n"
+            for start_x, start_y, end_x, end_y in zip(
+                self.points_start_x,
+                self.points_start_y,
+                self.points_end_x,
+                self.points_end_y,
+            )
+        )
+
 
 # ---------------- HOLE ----------------
 @dataclass
@@ -143,6 +201,13 @@ class KiFootprintHole:
     pos_x: float
     pos_y: float
     size: float
+
+    def export(self) -> str:
+        return (
+            f'\t(pad "" np_thru_hole circle {_at(self.pos_x, self.pos_y)}'
+            f" (size {_xy(self.size, self.size)}) (drill {ki_number(self.size)})"
+            f" {_layers('*.Cu *.Mask')})\n"
+        )
 
 
 # ---------------- CIRCLE ----------------
@@ -155,10 +220,30 @@ class KiFootprintCircle:
     layers: str
     stroke_width: float
 
+    def export(self) -> str:
+        return (
+            f"\t(fp_circle (center {_xy(self.cx, self.cy)})"
+            f" (end {_xy(self.end_x, self.end_y)}) {_stroke(self.stroke_width)}"
+            f" (fill none) {_layer(self.layers)})\n"
+        )
+
 
 # ---------------- RECTANGLE ----------------
 @dataclass
-class KiFootprintRectangle(KiFootprintTrack): ...
+class KiFootprintRectangle:
+    start_x: float
+    start_y: float
+    end_x: float
+    end_y: float
+    layers: str
+    stroke_width: float
+
+    def export(self) -> str:
+        return (
+            f"\t(fp_rect (start {_xy(self.start_x, self.start_y)})"
+            f" (end {_xy(self.end_x, self.end_y)}) {_stroke(self.stroke_width)}"
+            f" (fill none) {_layer(self.layers)})\n"
+        )
 
 
 # ---------------- ARC ----------------
@@ -166,11 +251,19 @@ class KiFootprintRectangle(KiFootprintTrack): ...
 class KiFootprintArc:
     start_x: float
     start_y: float
+    mid_x: float
+    mid_y: float
     end_x: float
     end_y: float
-    angle: float
     layers: str
     stroke_width: float
+
+    def export(self) -> str:
+        return (
+            f"\t(fp_arc (start {_xy(self.start_x, self.start_y)})"
+            f" (mid {_xy(self.mid_x, self.mid_y)}) (end {_xy(self.end_x, self.end_y)})"
+            f" {_stroke(self.stroke_width)} {_layer(self.layers)})\n"
+        )
 
 
 # ---------------- TEXT ----------------
@@ -183,8 +276,18 @@ class KiFootprintText:
     layers: str
     font_size: float
     thickness: float
-    display: str
-    mirror: str
+    hidden: bool
+    mirrored: bool
+
+    def export(self) -> str:
+        size = _xy(self.font_size, self.font_size)
+        return (
+            f"\t(fp_text user {ki_string(self.text)}"
+            f" {_at(self.pos_x, self.pos_y, self.orientation)}"
+            f" {_layer(self.layers)}{' (hide yes)' if self.hidden else ''}"
+            f" (effects (font (size {size}) (thickness {ki_number(self.thickness)}))"
+            f" (justify left{' mirror' if self.mirrored else ''})))\n"
+        )
 
 
 # ---------------- VIA ----------------
@@ -195,15 +298,27 @@ class KiFootprintVia:
     size: float
     diameter: float
 
+    def export(self) -> str:
+        return (
+            f'\t(pad "" thru_hole circle {_at(self.pos_x, self.pos_y)}'
+            f" (size {_xy(self.diameter, self.diameter)})"
+            f" (drill {ki_number(self.size)}) {_layers('*.Cu *.Paste *.Mask')})\n"
+        )
+
 
 # ---------------- SOLID REGION ----------------
 # EasyEDA SOLIDREGION: filled polygon on silkscreen or fab layer
 # (e.g. pin-1 dot, polarity mark).
-# Maps to KiCad fp_poly.
 @dataclass
 class KiFootprintSolidRegion:
     layer: str
     points: list[tuple[float, float]]
+
+    def export(self) -> str:
+        pts = " ".join(f"(xy {_xy(x, y)})" for x, y in self.points)
+        return (
+            f"\t(fp_poly (pts {pts}) {_stroke(0)} (fill solid) {_layer(self.layer)})\n"
+        )
 
 
 # ---------------- COPPER AREA ----------------
@@ -232,6 +347,9 @@ class Ki3dModelBase:
     y: float = 0.0
     z: float = 0.0
 
+    def xyz(self) -> str:
+        return f"(xyz {_xy(self.x, self.y)} {ki_number(self.z)})"
+
 
 @dataclass
 class Ki3dModel:
@@ -239,6 +357,12 @@ class Ki3dModel:
     translation: Ki3dModelBase
     rotation: Ki3dModelBase
     raw_wrl: Optional[str] = None
+
+    def export(self, path: str) -> str:
+        return (
+            f"\t(model {ki_string(path)} (offset {self.translation.xyz()})"
+            f" (scale (xyz 1 1 1)) (rotate {self.rotation.xyz()}))\n"
+        )
 
 
 # ---------------- FOOTPRINT  ----------------

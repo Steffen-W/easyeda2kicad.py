@@ -3,7 +3,7 @@ from __future__ import annotations
 # Global imports
 import logging
 from collections.abc import Iterable
-from math import ceil, cos, degrees, floor, isnan, radians, sin
+from math import ceil, cos, floor, isclose, isnan, radians, sin, tau
 from pathlib import Path
 from typing import Protocol, TypeVar
 
@@ -21,25 +21,10 @@ from ..easyeda.svg_path_parser import (
     parse_svg_points,
 )
 from .parameters_kicad_footprint import (
-    KI_ARC,
-    KI_CIRCLE,
-    KI_END_FILE,
-    KI_FAB_REF,
-    KI_FP_POLY,
-    KI_FP_TYPE,
-    KI_HOLE,
     KI_LAYERS,
-    KI_LINE,
-    KI_MODEL_3D,
-    KI_MODULE_INFO,
-    KI_PACKAGE_VALUE,
-    KI_PAD,
     KI_PAD_LAYER,
     KI_PAD_LAYER_THT,
     KI_PAD_SHAPE,
-    KI_REFERENCE,
-    KI_TEXT,
-    KI_VIA,
     Ki3dModel,
     Ki3dModelBase,
     KiFootprint,
@@ -53,15 +38,11 @@ from .parameters_kicad_footprint import (
     KiFootprintText,
     KiFootprintTrack,
     KiFootprintVia,
+    ki_fab_reference,
+    ki_footprint_header,
+    ki_property,
+    ki_string,
 )
-
-# ---------------------------------------
-
-
-def _arc_angle(sweep: float) -> float:
-    """KiCad angle in degrees of an arc with the given sweep angle in radians."""
-    return -degrees(sweep)
-
 
 # ---------------------------------------
 
@@ -82,20 +63,17 @@ def fp_to_ki(dim: float | str) -> float:
 
 def drill_to_ki(
     hole_radius: float, hole_length: float, pad_height: float, pad_width: float
-) -> str:
-    if hole_radius > 0 and hole_length != 0:
-        max_distance_hole = max(hole_radius * 2, hole_length)
-        pos_0 = pad_height - max_distance_hole
-        pos_90 = pad_width - max_distance_hole
-        max_distance = max(pos_0, pos_90)
-
-        if max_distance == pos_0:
-            return f"(drill oval {hole_radius * 2} {hole_length})"
-        else:
-            return f"(drill oval {hole_length} {hole_radius * 2})"
-    if hole_radius > 0:
-        return f"(drill {2 * hole_radius})"
-    return ""
+) -> tuple[float, float] | None:
+    """Drill size along x and y; a slot runs along the longer pad side."""
+    if hole_radius <= 0:
+        return None
+    diameter = hole_radius * 2
+    if hole_length == 0:
+        return diameter, diameter
+    longest = max(diameter, hole_length)
+    if pad_height - longest >= pad_width - longest:
+        return diameter, hole_length
+    return hole_length, diameter
 
 
 # ---------------------------------------
@@ -124,22 +102,6 @@ def _track(points: list[Point], layers: str, stroke_width: float) -> KiFootprint
         points_start_y=[y for _, y in points[:-1]],
         points_end_x=[x for x, _ in points[1:]],
         points_end_y=[y for _, y in points[1:]],
-        stroke_width=stroke_width,
-        layers=layers,
-    )
-
-
-def _rectangle(
-    corner: Point, opposite: Point, layers: str, stroke_width: float
-) -> KiFootprintRectangle:
-    """Outline of an axis-aligned rectangle between two corners (in mm)."""
-    xs = [corner[0], opposite[0], opposite[0], corner[0]]
-    ys = [corner[1], corner[1], opposite[1], opposite[1]]
-    return KiFootprintRectangle(
-        points_start_x=xs,
-        points_start_y=ys,
-        points_end_x=xs[1:] + xs[:1],
-        points_end_y=ys[1:] + ys[:1],
         stroke_width=stroke_width,
         layers=layers,
     )
@@ -307,6 +269,10 @@ class _OnLayer(Protocol):
     layer_id: int
 
 
+class _Element(Protocol):
+    def export(self) -> str: ...
+
+
 _Shape = TypeVar("_Shape", bound=_OnLayer)
 
 
@@ -376,14 +342,14 @@ class ExporterFootprintKicad:
 
     def _place_courtyard_and_fields(self) -> None:
         """Courtyard around pads, holes, vias and package body; reference
-        above and value below it and the silkscreen, %R in its center."""
+        above and value below it and the silkscreen, ${REFERENCE} in its center."""
         component = _extent(self._component_points)
         courtyard = None
         if component is not None:
             courtyard = _courtyard(component)
             corner, opposite = courtyard[:2], courtyard[2:]
             self.output.rectangles.append(
-                _rectangle(corner, opposite, "F.CrtYd", _COURTYARD_WIDTH)
+                KiFootprintRectangle(*corner, *opposite, "F.CrtYd", _COURTYARD_WIDTH)
             )
             self._extents["F.CrtYd"] = [corner, opposite]
         fields = _extent(
@@ -413,16 +379,11 @@ class ExporterFootprintKicad:
         )
 
         if self.input.model_3d is not None:
-            # The model offset is in mm with y up, like the EasyEDA translation;
-            # rounded to the written 0.001 mm, adding 0.0 turns -0.0 into 0.0
+            # The model offset is in mm with y up, like the EasyEDA translation
             offset = self.input.model_3d.translation
             ki_3d_model_info = Ki3dModel(
                 name=self.input.model_3d.name,
-                translation=Ki3dModelBase(
-                    x=round(offset.x, 3) + 0.0,
-                    y=round(offset.y, 3) + 0.0,
-                    z=round(offset.z, 3) + 0.0,
-                ),
+                translation=Ki3dModelBase(x=offset.x, y=offset.y, z=offset.z),
                 rotation=Ki3dModelBase(
                     x=(360 - self.input.model_3d.rotation.x) % 360,
                     y=(360 - self.input.model_3d.rotation.y) % 360,
@@ -459,9 +420,8 @@ class ExporterFootprintKicad:
                 layers=layers,
                 # KiCad pad numbers cannot contain spaces
                 number=ee_pad.number.replace(" ", "_"),
-                drill="",
+                drill=None,
                 orientation=angle_to_ki(ee_pad.rotation),
-                polygon="",
             )
 
             ki_pad.drill = drill_to_ki(
@@ -496,17 +456,11 @@ class ExporterFootprintKicad:
                     # unlike RECT pads where rotation is stored separately).
                     ki_pad.orientation = 0
 
-                    # Generate polygon with coordinates relative to the base pad's position.
                     outline = [self._ki_point(point) for point in points]
-                    path = "".join(
-                        "(xy {:.6f} {:.6f})".format(x - ki_pad.pos_x, y - ki_pad.pos_y)
-                        for x, y in outline
-                    )
-                    ki_pad.polygon = (
-                        "\n\t\t(primitives \n\t\t\t(gr_poly \n\t\t\t\t(pts"
-                        f" {path}\n\t\t\t\t) \n\t\t\t\t(width {_CUSTOM_PAD_STROKE})"
-                        " \n\t\t\t)\n\t\t)\n\t"
-                    )
+                    ki_pad.polygon = [
+                        (x - ki_pad.pos_x, y - ki_pad.pos_y) for x, y in outline
+                    ]
+                    ki_pad.polygon_width = _CUSTOM_PAD_STROKE
                     # The polygon's stroke is copper too
                     outline = [
                         disc_point
@@ -591,9 +545,9 @@ class ExporterFootprintKicad:
                 corner[0] + ee_rectangle.width,
                 corner[1] + ee_rectangle.height,
             )
-            ki_rectangle = _rectangle(
-                corner,
-                opposite,
+            ki_rectangle = KiFootprintRectangle(
+                *corner,
+                *opposite,
                 _layer(ee_rectangle.layer_id),
                 max(ee_rectangle.stroke_width, 0.01),
             )
@@ -627,26 +581,35 @@ class ExporterFootprintKicad:
                 # Segments between circular arcs, each run flattened to a track
                 runs = [[subpath.start]]
                 for start, segment in subpath.walk():
-                    circle = None
+                    geometry = circle = None
                     if isinstance(segment, SvgArc):
-                        circle = segment.geometry(start).circle()
-                    if circle is None:
+                        geometry = segment.geometry(start)
+                        circle = geometry.circle()
+                    if geometry is None or circle is None:
                         runs[-1] += SvgSubpath(start, [segment]).flatten()[1:]
                         continue
                     center, sweep = circle
-                    cx, cy = self._ki_point(center)
-                    end_x, end_y = self._ki_point(segment.end)
-                    self.output.arcs.append(
-                        KiFootprintArc(
-                            start_x=cx,
-                            start_y=cy,
-                            end_x=end_x,
-                            end_y=end_y,
-                            angle=_arc_angle(sweep),
-                            layers=layers,
-                            stroke_width=stroke_width,
+                    if isclose(abs(sweep), tau):
+                        # KiCad arcs need distinct ends
+                        self.output.circles.append(
+                            KiFootprintCircle(
+                                *self._ki_point(center),
+                                *self._ki_point(start),
+                                layers,
+                                stroke_width,
+                            )
                         )
-                    )
+                    else:
+                        # The circular arc through start, middle and end
+                        self.output.arcs.append(
+                            KiFootprintArc(
+                                *self._ki_point(start),
+                                *self._ki_point(geometry.point(0.5)),
+                                *self._ki_point(segment.end),
+                                layers,
+                                stroke_width,
+                            )
+                        )
                     runs.append([segment.end])
                 self.output.tracks += [
                     _track([self._ki_point(p) for p in run], layers, stroke_width)
@@ -656,23 +619,20 @@ class ExporterFootprintKicad:
 
         # For texts
         for ee_text in _imported(self.input.texts):
+            layers = _layer(ee_text.layer_id)
+            if ee_text.type == "N":
+                layers = layers.replace(".SilkS", ".Fab")
             ki_text = KiFootprintText(
                 pos_x=ee_text.center_x - self.input.bbox.x,
                 pos_y=ee_text.center_y - self.input.bbox.y,
                 orientation=angle_to_ki(ee_text.rotation),
                 text=ee_text.text,
-                layers=_layer(ee_text.layer_id),
+                layers=layers,
                 font_size=max(ee_text.font_size, 1),
                 thickness=max(ee_text.stroke_width, 0.01),
-                display=" hide" if ee_text.is_displayed is False else "",
-                mirror="",
+                hidden=not ee_text.is_displayed,
+                mirrored=layers.startswith("B."),
             )
-            ki_text.layers = (
-                ki_text.layers.replace(".SilkS", ".Fab")
-                if ee_text.type == "N"
-                else ki_text.layers
-            )
-            ki_text.mirror = " mirror" if ki_text.layers[0] == "B" else ""
             if ee_text.is_displayed:
                 self._add_extent(
                     ee_text.layer_id,
@@ -703,83 +663,43 @@ class ExporterFootprintKicad:
         model_3d_extension: str = "wrl",
     ) -> None:
         ki = self.output
-        ki_lib = ""
-
-        ki_lib += KI_MODULE_INFO.format(
-            package_lib="easyeda2kicad", package_name=ki.info.name, edit="5DC5F6A4"
-        )
+        ki_lib = ki_footprint_header(ki.info.name)
         if ki.info.description:
-            ki_lib += f'\t(descr "{ki.info.description}")\n'
+            ki_lib += f"\t(descr {ki_string(ki.info.description)})\n"
+
+        ki_lib += ki_property("Reference", "REF**", *ki.reference_pos, "F.SilkS", False)
+        ki_lib += ki_property("Value", ki.info.name, *ki.value_pos, "F.Fab", False)
+        for name, value in (
+            ("LCSC Part", ki.info.lcsc_id),
+            ("Manufacturer", ki.info.manufacturer),
+            ("MPN", ki.info.mpn),
+        ):
+            if value:
+                ki_lib += ki_property(name, value, 0, 0, "F.Fab", True)
 
         if ki.info.fp_type:
-            ki_lib += KI_FP_TYPE.format(
-                component_type=("smd" if ki.info.fp_type == "smd" else "through_hole")
-            )
+            attr = "smd" if ki.info.fp_type == "smd" else "through_hole"
+            ki_lib += f"\t(attr {attr})\n"
 
-        ki_lib += KI_REFERENCE.format(
-            pos_x=ki.reference_pos[0], pos_y=ki.reference_pos[1]
-        )
-        ki_lib += KI_PACKAGE_VALUE.format(
-            package_name=ki.info.name, pos_x=ki.value_pos[0], pos_y=ki.value_pos[1]
-        )
-        ki_lib += KI_FAB_REF.format(
-            pos_x=ki.fab_reference_pos[0], pos_y=ki.fab_reference_pos[1]
-        )
-
-        if ki.info.lcsc_id:
-            ki_lib += f'\t(property "LCSC Part" "{ki.info.lcsc_id}")\n'
-        if ki.info.manufacturer:
-            ki_lib += f'\t(property "Manufacturer" "{ki.info.manufacturer}")\n'
-        if ki.info.mpn:
-            ki_lib += f'\t(property "MPN" "{ki.info.mpn}")\n'
-
-        # ---------------------------------------
-
-        for track in ki.tracks + ki.rectangles:
-            for i in range(len(track.points_start_x)):
-                ki_lib += KI_LINE.format(
-                    start_x=track.points_start_x[i],
-                    start_y=track.points_start_y[i],
-                    end_x=track.points_end_x[i],
-                    end_y=track.points_end_y[i],
-                    layers=track.layers,
-                    stroke_width=track.stroke_width,
-                )
-
-        for pad in ki.pads:
-            ki_lib += KI_PAD.format(**vars(pad))
-
-        for hole in ki.holes:
-            ki_lib += KI_HOLE.format(**vars(hole))
-
-        for via in ki.vias:
-            ki_lib += KI_VIA.format(**vars(via))
-
-        for circle in ki.circles:
-            ki_lib += KI_CIRCLE.format(**vars(circle))
-
-        for arc in ki.arcs:
-            ki_lib += KI_ARC.format(**vars(arc))
-
-        for text in ki.texts:
-            ki_lib += KI_TEXT.format(**vars(text))
-
-        for region in ki.solid_regions:
-            pts_str = " ".join(f"(xy {x:.6f} {y:.6f})" for x, y in region.points)
-            ki_lib += KI_FP_POLY.format(pts=pts_str, layer=region.layer)
+        ki_lib += ki_fab_reference(*ki.fab_reference_pos)
+        elements: list[_Element] = [
+            *ki.tracks,
+            *ki.rectangles,
+            *ki.circles,
+            *ki.arcs,
+            *ki.solid_regions,
+            *ki.texts,
+            *ki.pads,
+            *ki.holes,
+            *ki.vias,
+        ]
+        ki_lib += "".join(element.export() for element in elements)
 
         if ki.model_3d is not None:
-            ki_lib += KI_MODEL_3D.format(
-                file_3d=f"{model_3d_path}/{ki.model_3d.name}.{model_3d_extension}",
-                pos_x=ki.model_3d.translation.x,
-                pos_y=ki.model_3d.translation.y,
-                pos_z=ki.model_3d.translation.z,
-                rot_x=ki.model_3d.rotation.x,
-                rot_y=ki.model_3d.rotation.y,
-                rot_z=ki.model_3d.rotation.z,
+            ki_lib += ki.model_3d.export(
+                f"{model_3d_path}/{ki.model_3d.name}.{model_3d_extension}"
             )
-
-        ki_lib += KI_END_FILE
+        ki_lib += ")\n"
 
         Path(footprint_full_path).parent.mkdir(parents=True, exist_ok=True)
         with open(

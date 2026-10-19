@@ -69,10 +69,10 @@ def _export(tmp_path: Path, model: Ee3dModel) -> str:
 
 def test_footprint_carries_the_placement_as_model_offset(tmp_path: Path) -> None:
     content = _export(tmp_path, _model(-3.65, 2.2, -4.0, rotation_z=270))
-    assert "(offset (xyz -3.650 2.200 -4.000))" in content
+    assert "(offset (xyz -3.65 2.2 -4))" in content
     assert "(rotate (xyz 0 0 90))" in content
 
 
 def test_model_offset_has_no_negative_zero(tmp_path: Path) -> None:
-    content = _export(tmp_path, _model(-0.0, -0.0001, 0.0))
-    assert "(offset (xyz 0.000 0.000 0.000))" in content
+    content = _export(tmp_path, _model(-0.0, -0.00001, 0.0))
+    assert "(offset (xyz 0 0 0))" in content

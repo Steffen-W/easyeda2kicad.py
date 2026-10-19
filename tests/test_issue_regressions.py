@@ -195,7 +195,7 @@ def test_issue_213_npth_cutout_becomes_edge_cuts(tmp_path: Path) -> None:
         ((float(x1), float(y1)), (float(x2), float(y2)))
         for x1, y1, x2, y2 in re.findall(
             r"\(fp_line \(start ([-\d.]+) ([-\d.]+)\) \(end ([-\d.]+) ([-\d.]+)\)"
-            r" \(layer Edge\.Cuts\)",
+            r' \(stroke [^)]+\) [^)]+\)\) \(layer "Edge\.Cuts"\)',
             content,
         )
     ]

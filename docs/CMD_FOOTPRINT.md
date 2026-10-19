@@ -130,7 +130,7 @@ RECT~3980.15~2979.15~12.5~4.5~3~gge226~0~1~none~~~
 **Notes:**
 
 - `stroke_width` applies to **all 4 border lines** of the rectangle
-- Converted to 4 separate fp_line entries in KiCad
+- Converted to a KiCad `fp_rect`
 
 ---
 
@@ -256,7 +256,8 @@ ARC~1~3~~M 3980 3000 A 5 5 0 0 1 3985 3005~~gge200~0
 
 **Notes:**
 
-- Converted to KiCad `fp_arc` using arc computation
+- Circular arcs become KiCad `fp_arc` through start, middle and end point, full
+  circles `fp_circle`; elliptical arcs and other segments become `fp_line` tracks
 
 ---
 
@@ -423,7 +424,10 @@ mm = easyeda_units * 10 * 0.0254
 
 ---
 
-## Courtyard and Fields
+## KiCad Output, Courtyard and Fields
+
+Footprints are written in the KiCad 8 format (`version 20240108`), which
+KiCad 8 and later read. Coordinates are in mm, rounded to 0.1 µm.
 
 EasyEDA has no courtyard layer, so the exporter generates one following the
 KiCad library conventions ([KLC F5.3](https://klc.kicad.org/footprint/f5/f5.3/)):
@@ -437,7 +441,7 @@ KiCad library conventions ([KLC F5.3](https://klc.kicad.org/footprint/f5/f5.3/))
 - **Reference** (`F.SilkS`): text center 1 mm above the courtyard and all
   visible front silkscreen shapes and texts, aligned with the courtyard center.
 - **Value** (`F.Fab`): text center 1 mm below them.
-- **`%R`** (`F.Fab`): in the center of the courtyard.
+- **`${REFERENCE}`** (`F.Fab`): in the center of the courtyard.
 
 Pads count by shape and rotation; lines, circles, arcs and texts by their
 geometry including half the line width. For texts this is the glyph strokes

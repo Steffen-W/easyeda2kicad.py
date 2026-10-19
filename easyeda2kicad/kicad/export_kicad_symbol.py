@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import NamedTuple, Sequence
 
 # Local imports
-from .._version import GENERATOR_URL
+from .._version import GENERATOR_URL, __version__
 from ..easyeda.parameters_easyeda import (
     EasyedaPinType,
     EeSymbol,
@@ -34,6 +34,8 @@ from ..easyeda.svg_path_parser import (
     parse_svg_points,
 )
 from .parameters_kicad_symbol import (
+    KICAD_SYM_VERSION_20231120,
+    KICAD_SYM_VERSION_NEW_LIBRARY,
     KICAD_SYM_VERSIONS_SORTED,
     KiPinStyle,
     KiPinType,
@@ -55,7 +57,7 @@ _SYM_LIB_REGEX = r'\n(\s*)\(symbol "{component_name}".*?\n\1\)(?=\n|$)'
 def read_symbol_lib_version(lib_path: str | None) -> int:
     """Return the .kicad_sym format version to use for the given library file.
 
-    - If lib_path is None or the file cannot be read: oldest known version.
+    - If lib_path is None or the file cannot be read: the format of new libraries.
     - If the file has no (version ...) field: oldest known version.
     - Otherwise: the largest known version that is <= the version in the file.
     """
@@ -71,9 +73,10 @@ def read_symbol_lib_version(lib_path: str | None) -> int:
                     if v <= file_version:
                         result = v
                 return result
+            return KICAD_SYM_VERSIONS_SORTED[0]
         except OSError:
             pass
-    return KICAD_SYM_VERSIONS_SORTED[0]
+    return KICAD_SYM_VERSION_NEW_LIBRARY
 
 
 def id_already_in_symbol_lib(lib_path: str, component_name: str) -> bool:
@@ -96,13 +99,19 @@ def write_component_in_symbol_lib_file(
     lib_path: str,
     component_name: str,
     component_content: str,
-    version: int = KICAD_SYM_VERSIONS_SORTED[0],
+    version: int = KICAD_SYM_VERSION_NEW_LIBRARY,
     generator: str = GENERATOR_URL,
 ) -> None:
     """Write a symbol into the library, replacing it if it already exists."""
     if not Path(lib_path).is_file():
+        # KiCad 8 quotes the generator and adds its version
+        header = (
+            f'(generator "{generator}")\n  (generator_version "{__version__}")'
+            if version >= KICAD_SYM_VERSION_20231120
+            else f"(generator {generator})"
+        )
         Path(lib_path).write_text(
-            f"(kicad_symbol_lib\n  (version {version})\n  (generator {generator})\n)",
+            f"(kicad_symbol_lib\n  (version {version})\n  {header}\n)",
             encoding="utf-8",
         )
         logging.debug(f"Created symbol lib: {lib_path}")

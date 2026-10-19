@@ -34,6 +34,8 @@ KICAD_SYM_VERSIONS_SORTED = [
     KICAD_SYM_VERSION_20241209,
     KICAD_SYM_VERSION_20251024,
 ]
+# Format of new libraries: KiCad 8, read by KiCad 8 and later
+KICAD_SYM_VERSION_NEW_LIBRARY = KICAD_SYM_VERSION_20231120
 
 
 class KiPinType(Enum):

@@ -1,6 +1,5 @@
 """Unit tests for footprint writer helper functions."""
 
-import math
 import re
 from pathlib import Path
 
@@ -10,14 +9,14 @@ from easyeda2kicad.easyeda.easyeda_importer import (
     EasyedaFootprintImporter,
     _sanitize_footprint_name,
 )
-from easyeda2kicad.easyeda.svg_path_parser import BEZIER_SEGMENTS, Point, SvgArc
+from easyeda2kicad.easyeda.svg_path_parser import BEZIER_SEGMENTS
 from easyeda2kicad.kicad.export_kicad_footprint import (
     ExporterFootprintKicad,
-    _arc_angle,
     angle_to_ki,
     drill_to_ki,
     fp_to_ki,
 )
+from easyeda2kicad.kicad.parameters_kicad_footprint import ki_number, ki_string
 
 # ---------------------------------------------------------------------------
 # fp_to_ki
@@ -57,26 +56,39 @@ class TestFpToKi:
 
 class TestDrillToKi:
     def test_round_hole(self) -> None:
-        result = drill_to_ki(
-            hole_radius=0.5, hole_length=0, pad_height=1.0, pad_width=1.0
-        )
-        assert result == "(drill 1.0)"
+        assert drill_to_ki(0.5, 0, pad_height=1.0, pad_width=1.0) == (1.0, 1.0)
 
     def test_no_hole(self) -> None:
-        assert drill_to_ki(0, 0, 1.0, 1.0) == ""
+        assert drill_to_ki(0, 0, 1.0, 1.0) is None
 
-    def test_oval_horizontal(self) -> None:
-        # hole_length > hole_radius*2 → oval, longer in first dimension
-        result = drill_to_ki(
-            hole_radius=0.3, hole_length=1.0, pad_height=2.0, pad_width=2.0
-        )
-        assert "oval" in result
+    def test_slot_runs_along_the_longer_pad_side(self) -> None:
+        assert drill_to_ki(0.3, 1.0, pad_height=3.0, pad_width=1.0) == (0.6, 1.0)
+        assert drill_to_ki(0.3, 1.0, pad_height=1.0, pad_width=3.0) == (1.0, 0.6)
 
-    def test_oval_orientation_depends_on_pad(self) -> None:
-        # pad_height > pad_width → slot along height axis
-        r1 = drill_to_ki(0.3, 1.0, pad_height=3.0, pad_width=1.0)
-        r2 = drill_to_ki(0.3, 1.0, pad_height=1.0, pad_width=3.0)
-        assert r1 != r2
+
+# ---------------------------------------------------------------------------
+# KiCad number and string syntax
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [(2.54, "2.54"), (10.0, "10"), (0.629996, "0.63"), (-0.00001, "0"), (-1.5, "-1.5")],
+)
+def test_number_is_written_without_trailing_zeros(value: float, text: str) -> None:
+    assert ki_number(value) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "quoted"),
+    [
+        ('A "B"', '"A \\"B\\""'),
+        ("C:\\D", '"C:\\\\D"'),
+        ("a\nb\r\tc", '"a\\nb\\r\\tc"'),
+    ],
+)
+def test_string_is_quoted_and_escaped(text: str, quoted: str) -> None:
+    assert ki_string(text) == quoted
 
 
 # ---------------------------------------------------------------------------
@@ -100,32 +112,6 @@ class TestAngleToKi:
 
     def test_invalid_string(self) -> None:
         assert angle_to_ki("bad") == 0.0
-
-
-# ---------------------------------------------------------------------------
-# _arc_angle
-# ---------------------------------------------------------------------------
-
-
-def _angle(large_arc: bool, sweep: bool, start: Point, end: Point) -> float:
-    return _arc_angle(
-        SvgArc(1, 1, 0, large_arc, sweep, end).geometry(start).sweep_angle
-    )
-
-
-class TestArcAngle:
-    def test_semicircle(self) -> None:
-        assert abs(_angle(False, True, (-1, 0), (1, 0))) == pytest.approx(180)
-
-    def test_large_arc_flag_selects_the_longer_arc(self) -> None:
-        assert _angle(False, True, (1, 0), (0, 1)) == pytest.approx(-90)
-        assert _angle(True, True, (1, 0), (0, 1)) == pytest.approx(-270)
-
-    def test_sweep_flag_inverts_the_sign(self) -> None:
-        assert _angle(False, False, (1, 0), (0, 1)) == pytest.approx(90)
-
-    def test_full_circle_keeps_its_extent(self) -> None:
-        assert _arc_angle(math.tau) == pytest.approx(-360)
 
 
 # ---------------------------------------------------------------------------
@@ -153,9 +139,22 @@ def _export_arc(tmp_path: Path, path: str) -> str:
     return _export(tmp_path, f"ARC~1~3~~{path}~~gge1~0")
 
 
+def _arcs(content: str) -> list[list[float]]:
+    """Start, mid and end coordinates of each fp_arc."""
+    pattern = r"\(fp_arc \(start (\S+) (\S+)\) \(mid (\S+) (\S+)\) \(end (\S+) (\S+)\)"
+    return [list(map(float, arc)) for arc in re.findall(pattern, content)]
+
+
+def test_footprint_is_written_in_kicad_8_format(tmp_path: Path) -> None:
+    content = _export(tmp_path)
+    assert content.startswith('(footprint "FP"\n\t(version 20240108)\n')
+    assert '(property "Reference" "REF**" (at 0 -1) (layer "F.SilkS")' in content
+    assert '(fp_text user "${REFERENCE}" (at 0 0) (layer "F.Fab")' in content
+
+
 def test_pad_number_spaces_become_underscores(tmp_path: Path) -> None:
     pad = "PAD~RECT~410~300~10~10~1~~A 1~0~~0~gge1~0~~Y~0"
-    assert "(pad A_1 smd rect" in _export(tmp_path, pad)
+    assert '(pad "A_1" smd rect' in _export(tmp_path, pad)
 
 
 @pytest.mark.parametrize("points", ["400 300", ""])
@@ -169,20 +168,23 @@ def test_track_with_fewer_than_two_points_is_skipped(
 class TestHoles:
     def test_hole_is_not_plated(self, tmp_path: Path) -> None:
         content = _export(tmp_path, "HOLE~410~300~2~gge1~0")
-        assert '(pad "" np_thru_hole circle (at 2.54 0.00) (size 1.02 1.02)' in content
+        assert (
+            '(pad "" np_thru_hole circle (at 2.54 0) (size 1.016 1.016) (drill 1.016)'
+            ' (layers "*.Cu" "*.Mask"))'
+        ) in content
 
     @pytest.mark.parametrize(
         ("plated", "expected"),
         [
             (
                 "Y",
-                "(pad 1 thru_hole circle (at 2.54 0.00 0.00) (size 2.540 2.540) "
-                "(layers *.Cu *.Mask)",
+                '(pad "1" thru_hole circle (at 2.54 0) (size 2.54 2.54) (drill 1.016)'
+                ' (layers "*.Cu" "*.Mask"))',
             ),
             (
                 "N",
-                "(pad 1 np_thru_hole circle (at 2.54 0.00 0.00) (size 2.540 2.540) "
-                "(layers *.Mask)",
+                '(pad "1" np_thru_hole circle (at 2.54 0) (size 2.54 2.54)'
+                ' (drill 1.016) (layers "*.Mask"))',
             ),
         ],
     )
@@ -194,7 +196,20 @@ class TestHoles:
 
 
 def _courtyard(content: str) -> list[str]:
-    return re.findall(r"\(fp_line \(start ([-\d.]+ [-\d.]+)\).*F\.CrtYd", content)
+    """Start and end corner of the courtyard rectangle, if there is one."""
+    match = re.search(
+        r'\(fp_rect \(start ([-\d.]+ [-\d.]+)\) \(end ([-\d.]+ [-\d.]+)\).*"F\.CrtYd"',
+        content,
+    )
+    return list(match.groups()) if match else []
+
+
+def _reference_at(content: str) -> str:
+    match = re.search(
+        r'\(property "Reference" "REF\*\*" \(at ([-\d.]+ [-\d.]+)\)', content
+    )
+    assert match is not None
+    return match.group(1)
 
 
 class TestCourtyardAndFields:
@@ -206,35 +221,25 @@ class TestCourtyardAndFields:
     ) -> None:
         content = _export(tmp_path, self.PAD)
         # Pad 1.27..3.81 x -1.27..1.27 mm grown by 0.25 mm
-        assert _courtyard(content) == [
-            "1.02 -1.52",
-            "4.06 -1.52",
-            "4.06 1.52",
-            "1.02 1.52",
-        ]
-        assert "(fp_text reference REF** (at 2.540 -2.520)" in content
-        assert "(at 2.540 2.520) (layer F.Fab)" in content
-        assert "(fp_text user %R (at 2.540 0.000)" in content
+        assert _courtyard(content) == ["1.02 -1.52", "4.06 1.52"]
+        assert _reference_at(content) == "2.54 -2.52"
+        assert '"FP" (at 2.54 2.52) (layer "F.Fab")' in content
+        assert '(fp_text user "${REFERENCE}" (at 2.54 0)' in content
 
     def test_rotated_oval_pad_is_enclosed_and_snapped_to_the_grid(
         self, tmp_path: Path
     ) -> None:
         # 1.016 x 2.54 mm turned by 90°: ±1.27 x ±0.508 mm
         pad = "PAD~OVAL~400~300~4~10~1~~1~0~~90~gge1~0~~Y~0"
-        assert _courtyard(_export(tmp_path, pad))[:3] == [
-            "-1.52 -0.76",
-            "1.52 -0.76",
-            "1.52 0.76",
-        ]
+        assert _courtyard(_export(tmp_path, pad)) == ["-1.52 -0.76", "1.52 0.76"]
 
     def test_body_becomes_fab_outline_inside_the_courtyard(
         self, tmp_path: Path
     ) -> None:
         content = _export(tmp_path, self.PAD, self.BODY)
-        assert content.count("(layer F.Fab) (width 0.10)") == 4
+        assert content.count('(stroke (width 0.1) (type solid)) (layer "F.Fab")') == 4
         # Body ±2.54 mm, pad up to 3.81 mm
-        assert _courtyard(content)[0] == "-2.79 -2.79"
-        assert _courtyard(content)[2] == "4.06 2.79"
+        assert _courtyard(content) == ["-2.79 -2.79", "4.06 2.79"]
 
     @pytest.mark.parametrize(
         "body",
@@ -247,9 +252,7 @@ class TestCourtyardAndFields:
         self, tmp_path: Path, body: str
     ) -> None:
         # Body edge ±2.54 mm; its 0.254 mm line does not count
-        content = _export(tmp_path, body)
-        assert _courtyard(content)[0] == "-2.79 -2.79"
-        assert _courtyard(content)[2] == "2.79 2.79"
+        assert _courtyard(_export(tmp_path, body)) == ["-2.79 -2.79", "2.79 2.79"]
 
     def test_custom_pad_includes_the_stroke_of_its_polygon(
         self, tmp_path: Path
@@ -265,7 +268,7 @@ class TestCourtyardAndFields:
         # 0.254 mm wide silkscreen line at y = -5.08 mm, above the courtyard
         silk = "TRACK~1~3~~395 280 405 280~gge3~0"
         content = _export(tmp_path, self.BODY, silk)
-        assert "(fp_text reference REF** (at 0.000 -6.207)" in content
+        assert _reference_at(content) == "0 -6.207"
 
     @pytest.mark.parametrize(("displayed", "reference_y"), [("", -6.715), ("0", -3.79)])
     def test_reference_clears_visible_silkscreen_texts(
@@ -274,7 +277,7 @@ class TestCourtyardAndFields:
         # Glyph strokes up to y = -5.588 mm, 0.254 mm wide
         text = f"TEXT~L~395~285~1~0~0~3~~8~AB~M 395 278 L 405 285~{displayed}~gge4~~0"
         content = _export(tmp_path, self.BODY, text)
-        assert f"(fp_text reference REF** (at 0.000 {reference_y:.3f})" in content
+        assert _reference_at(content) == f"0 {reference_y:g}"
 
     @pytest.mark.parametrize("layer", ["100", "101"])
     def test_lead_and_polarity_shapes_are_skipped(
@@ -286,10 +289,42 @@ class TestCourtyardAndFields:
     def test_footprint_without_shapes_has_no_courtyard(self, tmp_path: Path) -> None:
         content = _export(tmp_path)
         assert not _courtyard(content)
-        assert "(fp_text reference REF** (at 0.000 -1.000)" in content
+        assert _reference_at(content) == "0 -1"
 
 
 class TestArcExport:
+    @pytest.mark.parametrize(
+        ("flags", "mid"),
+        [
+            ("0 1", (1.7961, 1.7961)),
+            ("1 1", (4.3361, 4.3361)),
+            ("0 0", (0.7439, 0.7439)),
+        ],
+    )
+    def test_arc_runs_through_its_middle(
+        self, tmp_path: Path, flags: str, mid: tuple[float, float]
+    ) -> None:
+        # Quarter or three-quarter circle of radius 2.54 mm from (2.54, 0) to (0, 2.54)
+        content = _export_arc(tmp_path, f"M 410 300 A 10 10 0 {flags} 400 310")
+        ((*start, mid_x, mid_y, end_x, end_y),) = _arcs(content)
+        assert start == [2.54, 0] and (end_x, end_y) == (0, 2.54)
+        assert (mid_x, mid_y) == pytest.approx(mid)
+
+    def test_arc_is_written_as_in_kicad_8(self, tmp_path: Path) -> None:
+        # KiCad 8 writes arcs without a fill, unlike circles and rectangles
+        content = _export_arc(tmp_path, "M 390 300 A 10 10 0 0 1 410 300")
+        assert (
+            "(fp_arc (start -2.54 0) (mid 0 -2.54) (end 2.54 0)"
+            ' (stroke (width 0.254) (type solid)) (layer "F.SilkS"))'
+        ) in content
+
+    def test_full_circle_becomes_a_circle(self, tmp_path: Path) -> None:
+        # KiCad arcs need distinct ends
+        # Ending within float precision at its start
+        content = _export_arc(tmp_path, "M 410 300 A 10 10 0 1 1 410.0000000000001 300")
+        assert "(fp_arc" not in content
+        assert "(fp_circle (center 2.54 -2.54) (end 2.54 0)" in content
+
     def test_compact_numbers(self, tmp_path: Path) -> None:
         compact = _export_arc(tmp_path, "M400-300A10 10 0 0 1 410-290")
         spaced = _export_arc(tmp_path, "M 400 -300 A 10 10 0 0 1 410 -290")
@@ -300,7 +335,7 @@ class TestArcExport:
         # SVG draws an arc with a zero radius as a straight line
         content = _export_arc(tmp_path, "M 400 300 A 0 10 0 0 1 410 300")
         assert "(fp_arc" not in content
-        assert "(fp_line (start 0.00 0.00) (end 2.54 0.00) (layer F.SilkS)" in content
+        assert "(fp_line (start 0 0) (end 2.54 0) (stroke (width 0.254)" in content
 
     def test_relative_path(self, tmp_path: Path) -> None:
         relative = _export_arc(tmp_path, "M 400 -300 a 10 10 0 0 1 10 10")
@@ -322,7 +357,8 @@ class TestArcExport:
 
     def test_tiny_radius_is_scaled_up_to_the_chord(self, tmp_path: Path) -> None:
         content = _export_arc(tmp_path, "M 400 300 A 1e-6 1e-6 0 0 1 410 300")
-        assert "(fp_arc (start 1.27 0.00) (end 2.54 0.00) (angle -180.00)" in content
+        # A semicircle over the chord, bulging up for the clockwise sweep
+        assert _arcs(content) == [[0, 0, 1.27, -1.27, 2.54, 0]]
 
     def test_path_without_segments_is_skipped(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
