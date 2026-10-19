@@ -12,7 +12,7 @@ This document describes how 3D models are obtained and integrated into KiCad foo
 2. Download OBJ and STEP files from EasyEDA using UUID
 3. Convert OBJ → WRL (VRML) for KiCad visualization
 4. Pass-through STEP files unchanged (binary)
-5. Reference models in footprint with coordinate transformation
+5. Reference the WRL model in the footprint with the EasyEDA placement as model offset
 
 ---
 
@@ -101,16 +101,16 @@ f 2 3 4
 
 ### Coordinate Conversion
 
-**OBJ (mm) → WRL (inches):**
+**OBJ (mm) → WRL (KiCad VRML unit = 0.1 inch):**
 
 ```python
-inch = mm / 25.4
+vrml = mm / 2.54
 ```
 
 **Example:**
 
-- OBJ: `v 25.4 50.8 76.2` (mm)
-- WRL: `1.0 2.0 3.0` (inches)
+- OBJ: `v 2.54 5.08 7.62` (mm)
+- WRL: `1.0 2.0 3.0` (0.1 inch)
 
 ### VRML Output Format
 
@@ -148,18 +148,29 @@ Shape {
 
 ## Coordinate Transformation
 
+### Centering
+
+During OBJ → WRL conversion the model is centered on its own origin: the XY
+center of its bounding box moves to (0, 0) and its lowest point to z = 0. This
+is the frame in which EasyEDA places models (`smt-gl-engine.js`, `fi()`).
+
 ### Translation
 
-The XY and Z offset is baked into the WRL vertex coordinates during OBJ→WRL conversion:
-the OBJ bounding-box centre is subtracted from all vertices so the model is centred on (0,0,0).
-This mirrors the behaviour of EasyEDA's `smt-gl-engine.js` (`fi()`: z_min always shifted to 0).
-
-As a result the KiCad footprint always receives offset **(0, 0, 0)**:
+The EasyEDA placement becomes the model offset of the footprint, in mm with y up:
 
 ```python
-# All footprint types — offset fully encoded in WRL vertices
-translation = Ki3dModelBase(x=0.0, y=0.0, z=0.0)
+x = (c_origin.x - head.x) * 0.254
+y = -(c_origin.y - head.y) * 0.254
+z = z * 0.254
 ```
+
+If the center of the 2D outline in the SVGNODE child nodes differs from
+`(x, y)` by more than 0.1 mm, the outline center is used instead.
+
+KiCad applies the model offset after the model rotation
+(`CalcModelMatrix()` in `3d-viewer/3d_math.cpp`: offset + Rz·Ry·Rx · point).
+The placement must therefore not be part of the WRL vertices, or KiCad would
+rotate it along with the model.
 
 ### Rotation
 
@@ -177,16 +188,10 @@ rz = 360 - model_3d.rotation.z
 **Model Reference:**
 
 ```
-(model "${EASYEDA2KICAD}/IND-SMD_L7.0-W6.6-H3.0.wrl"
-  (at (xyz 0 0 0))
+(model "${EASYEDA2KICAD}/DC-IN-TH_L14.4-W9.0-H11.0.wrl"
+  (offset (xyz -3.650 2.200 -4.000))
   (scale (xyz 1 1 1))
-  (rotate (xyz 0 0 0))
-)
-
-(model "${EASYEDA2KICAD}/IND-SMD_L7.0-W6.6-H3.0.step"
-  (at (xyz 0 0 0))
-  (scale (xyz 1 1 1))
-  (rotate (xyz 0 0 0))
+  (rotate (xyz 0 0 90))
 )
 ```
 
@@ -207,6 +212,7 @@ MyLibrary.3dshapes/
 | Network Required       | 3D models cannot be obtained offline        |
 | Material Approximation | VRML may not perfectly match OBJ appearance |
 | Server Dependency      | Requires EasyEDA servers to be available    |
+| STEP Placement         | The STEP file is passed through unchanged; it matches the WRL model only if EasyEDA stores it centered with its bottom at z = 0 |
 
 ---
 
@@ -216,6 +222,7 @@ Enable local caching for faster re-conversion:
 
 ```python
 import logging
+
 logging.basicConfig(level=logging.DEBUG)
 ```
 

@@ -11,8 +11,8 @@ Supported shape types (symbol):
     E   – Ellipse
     C   – Circle
     R   – Rectangle (both plain and rounded-corner variants)
-    A   – Arc  (SVG path string passed through as-is)
-    PT  – Path (SVG path string passed through as-is)
+    A   – Arc  (SVG path data passed through as-is)
+    PT  – Path (SVG path data passed through as-is)
     T   – Text
 
 Supported shape types (footprint):
@@ -28,8 +28,11 @@ from __future__ import annotations
 
 import html
 import logging
-import re
+import math
 from typing import Any
+
+from .parameters_easyeda import _safe_bool
+from .svg_path_parser import parse_svg_path, parse_svg_points
 
 logger = logging.getLogger(__name__)
 
@@ -89,14 +92,25 @@ def _f(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _rotate(
+    point: tuple[float, float], degrees: float, center: tuple[float, float]
+) -> tuple[float, float]:
+    """Point rotated about center like SVG rotate(degrees) (clockwise, y down)."""
+    angle = math.radians(degrees)
+    dx, dy = point[0] - center[0], point[1] - center[1]
+    return (
+        center[0] + dx * math.cos(angle) - dy * math.sin(angle),
+        center[1] + dx * math.sin(angle) + dy * math.cos(angle),
+    )
+
+
 def _parse_points(pts: str) -> list[tuple[float, float]]:
-    """Parse EasyEDA space-separated point string 'x1 y1 x2 y2 ...'"""
-    nums = pts.split()
-    result = []
-    for i in range(0, len(nums), 2):
-        if i + 1 < len(nums):
-            result.append((_f(nums[i]), _f(nums[i + 1])))
-    return result
+    """Points of an EasyEDA point list; none if it is malformed."""
+    try:
+        return parse_svg_points(pts)
+    except ValueError as e:
+        logger.debug(f"SVG preview: skipping point list: {e}")
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -139,25 +153,20 @@ class _BBox:
 
 
 def _bbox_from_path(path_d: str, bbox: _BBox) -> None:
-    """Approximate bounding box from an SVG path by extracting consecutive numeric pairs.
-
-    Inherently imprecise: arc commands (A) have 7 parameters per segment (rx, ry,
-    rotation, large-arc-flag, sweep-flag, x, y), H/V commands have only one
-    coordinate, and Bezier control points extend beyond the rendered curve.
-    Acceptable only for simple M/L paths; for arc-heavy paths the API BBox is
-    authoritative.
-    """
-    nums = re.findall(r"[-+]?\d*\.?\d+", path_d)
-    for i in range(0, len(nums) - 1, 2):
-        try:
-            bbox.add(float(nums[i]), float(nums[i + 1]))
-        except (ValueError, IndexError):
-            pass
+    """Extend bbox by the exact extent of an SVG path; a malformed path adds
+    nothing."""
+    try:
+        subpaths = parse_svg_path(path_d)
+    except ValueError as e:
+        logger.debug(f"SVG preview: skipping path in bbox: {e}")
+        return
+    for subpath in subpaths:
+        bbox.add_pts(subpath.extremes())
 
 
 def _seed_bbox_from_api(data_str: dict[str, Any], bbox: _BBox) -> None:
     """Seed bbox from the API-provided BBox field to anchor the viewBox even
-    when individual shape parsers miss some extents (e.g. arc endpoints)."""
+    when individual shape parsers miss some extents (e.g. text widths)."""
     api_bbox = data_str.get("BBox", {})
     if not api_bbox:
         return
@@ -350,12 +359,8 @@ def _render_rectangle(shape: str, bbox: _BBox) -> str:
     )
 
 
-def _render_arc(shape: str, _bbox: _BBox) -> str:
-    """A~path~helper_dots~stroke_color~stroke_width~stroke_style~fill_color~id~locked
-
-    bbox is intentionally unused: SVG arc flags (0/1) are misread as coordinates
-    by _bbox_from_path, producing bogus (0,0) points. API BBox is authoritative.
-    """
+def _render_arc(shape: str, bbox: _BBox) -> str:
+    """A~path~helper_dots~stroke_color~stroke_width~stroke_style~fill_color~id~locked"""
     parts = shape.split("~")
     if len(parts) < 2:
         return ""
@@ -363,6 +368,7 @@ def _render_arc(shape: str, _bbox: _BBox) -> str:
     stroke = _color(parts[3] if len(parts) > 3 else "", "#000000")
     width = _stroke_w(parts[4] if len(parts) > 4 else "")
     fill = _fill(parts[6] if len(parts) > 6 else "none")
+    _bbox_from_path(path_d, bbox)
     return (
         f'<path d="{path_d}" stroke="{stroke}" stroke-width="{width}" fill="{fill}"/>'
     )
@@ -506,7 +512,7 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
         elif designator == "PAD":
             # PAD~shape~center_x~center_y~width~height~layer_id~net~number~hole_radius~points~rotation~
             #     id~hole_length~slot_outline~is_plated~is_locked~clearance1~clearance2~hole_point
-            # [15] is_plated: "Y"=plated (has copper), "N"=non-plated (drill only, no copper fill).
+            # [15] is_plated: plated (copper) or non-plated (drill only, no copper)
             if len(parts) < 7:
                 continue
             pad_shape = parts[1].lower()
@@ -517,56 +523,59 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
             rotation = _f(parts[11]) if len(parts) > 11 else 0.0
             hole_r = _f(parts[9]) if len(parts) > 9 else 0.0
             hole_length = _f(parts[13]) if len(parts) > 13 else 0.0
-            is_plated = (parts[15] if len(parts) > 15 else "Y") != "N"
-            bbox.add(px - pw / 2, py - ph / 2)
-            bbox.add(px + pw / 2, py + ph / 2)
-            transform = f' transform="rotate({rotation},{px},{py})"' if rotation else ""
-            if is_plated:
-                if pad_shape == "polygon":
-                    pts = (
-                        _parse_points(parts[10])
-                        if len(parts) > 10 and parts[10]
-                        else []
-                    )
-                    if pts:
-                        bbox.add_pts(pts)
-                        pts_attr = " ".join(f"{x},{y}" for x, y in pts)
-                        elements.append(
-                            f'<polygon points="{pts_attr}" '
-                            f'stroke="{layer_color}" stroke-width="0.5" fill="{layer_color}"{transform}/>'
-                        )
-                elif pad_shape in ("ellipse", "oval"):
-                    if pw == ph:
-                        elements.append(
-                            f'<circle cx="{px}" cy="{py}" r="{pw / 2}" '
-                            f'stroke="{layer_color}" stroke-width="0.5" fill="{layer_color}"{transform}/>'
-                        )
-                    else:
-                        elements.append(
-                            f'<ellipse cx="{px}" cy="{py}" rx="{pw / 2}" ry="{ph / 2}" '
-                            f'stroke="{layer_color}" stroke-width="0.5" fill="{layer_color}"{transform}/>'
-                        )
-                else:
+            is_plated = _safe_bool(parts[15] if len(parts) > 15 else None, True)
+            # Shapes in the frame of the unrotated pad
+            pad_elements = []
+            if is_plated and pad_shape == "polygon":
+                # Polygon points are absolute and already rotated
+                pts = _parse_points(parts[10]) if len(parts) > 10 else []
+                if pts:
+                    bbox.add_pts(pts)
+                    pts_attr = " ".join(f"{x},{y}" for x, y in pts)
                     elements.append(
-                        f'<rect x="{px - pw / 2}" y="{py - ph / 2}" width="{pw}" height="{ph}" '
-                        f'stroke="{layer_color}" stroke-width="0.5" fill="{layer_color}"{transform}/>'
+                        f'<polygon points="{pts_attr}" '
+                        f'stroke="{layer_color}" stroke-width="0.5" fill="{layer_color}"/>'
                     )
-            # Through-hole drill (plated: white hole punched through copper;
-            # non-plated: same appearance since no copper was drawn).
-            # hole_length > 0 → slot (capsule): render as rounded rect with the pad's rotation.
+            else:
+                bbox.add_pts(
+                    [
+                        _rotate((px + dx, py + dy), rotation, (px, py))
+                        for dx in (-pw / 2, pw / 2)
+                        for dy in (-ph / 2, ph / 2)
+                    ]
+                )
+            if is_plated and pad_shape != "polygon":
+                copper = (
+                    f'stroke="{layer_color}" stroke-width="0.5" fill="{layer_color}"'
+                )
+                if pad_shape == "ellipse":
+                    pad_elements.append(
+                        f'<ellipse cx="{px}" cy="{py}" rx="{pw / 2}" ry="{ph / 2}" '
+                        f"{copper}/>"
+                    )
+                else:
+                    # OVAL: rectangle with round ends
+                    corner = min(pw, ph) / 2 if pad_shape == "oval" else 0
+                    pad_elements.append(
+                        f'<rect x="{px - pw / 2}" y="{py - ph / 2}" width="{pw}" '
+                        f'height="{ph}" rx="{corner}" ry="{corner}" {copper}/>'
+                    )
+            # Drill hole; a slot runs along the longer pad side, as in the KiCad
+            # export
             if hole_r > 0:
-                if hole_length > 0:
-                    elements.append(
-                        f'<rect x="{px - hole_r}" y="{py - hole_length / 2}" '
-                        f'width="{hole_r * 2}" height="{hole_length}" '
-                        f'rx="{hole_r}" ry="{hole_r}" '
-                        f'stroke="#222222" stroke-width="0.3" fill="white"{transform}/>'
-                    )
-                else:
-                    elements.append(
-                        f'<circle cx="{px}" cy="{py}" r="{hole_r}" '
-                        f'stroke="#222222" stroke-width="0.3" fill="white"/>'
-                    )
+                along_x = pw > ph
+                length = max(hole_length, 2 * hole_r)
+                sx, sy = (length, 2 * hole_r) if along_x else (2 * hole_r, length)
+                pad_elements.append(
+                    f'<rect x="{px - sx / 2}" y="{py - sy / 2}" width="{sx}" '
+                    f'height="{sy}" rx="{hole_r}" ry="{hole_r}" '
+                    f'stroke="#222222" stroke-width="0.3" fill="white"/>'
+                )
+            if pad_elements:
+                transform = f' transform="rotate({rotation},{px},{py})"'
+                elements.append(
+                    f"<g{transform if rotation else ''}>{''.join(pad_elements)}</g>"
+                )
             if pad_number and is_plated:
                 elements.append(
                     f'<text x="{px}" y="{py}" text-anchor="middle" dominant-baseline="central" '
@@ -594,7 +603,7 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
                 continue
             path_d = parts[4]
             layer_color = _LAYER_COLORS.get(parts[2], "#888888")
-            # bbox intentionally not updated: arc flags (0/1) corrupt _bbox_from_path. API BBox is authoritative.
+            _bbox_from_path(path_d, bbox)
             elements.append(
                 f'<path d="{path_d}" stroke="{layer_color}" stroke-width="{_stroke_w(parts[1])}" fill="none"/>'
             )
@@ -645,7 +654,7 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
             path_d = parts[3]
             region_type = parts[4] if len(parts) > 4 else "solid"
             layer_color = _LAYER_COLORS.get(parts[1], "#888888")
-            # bbox intentionally not updated: arc flags (0/1) corrupt _bbox_from_path. API BBox is authoritative.
+            _bbox_from_path(path_d, bbox)
             if region_type == "cutout":
                 fill_attr = 'fill="none"'
                 stroke_color = layer_color

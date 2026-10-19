@@ -105,7 +105,7 @@ class TestSymbolC381116:
 
 
 class TestFootprintC381116:
-    """TRACK, CIRCLE, PAD OVAL (w≠h), RECT, SOLIDREGION solid + cutout."""
+    """TRACK, CIRCLE, rotated PAD OVAL with slot, RECT, SOLIDREGION solid + cutout."""
 
     @pytest.fixture(autouse=True)
     def _svg(self) -> None:
@@ -123,9 +123,17 @@ class TestFootprintC381116:
     def test_rect_shape(self) -> None:
         assert "<rect " in self.svg
 
-    def test_oval_pad_ellipse(self) -> None:
-        # PAD OVAL with w≠h → <ellipse rx="..." ry="..."> (not <circle>)
-        assert "<ellipse " in self.svg
+    def test_oval_pad_is_a_rect_with_round_ends(self) -> None:
+        # Pad 1: OVAL 16.5354 x 7.0866 rotated by 90° with a slot along its length
+        assert (
+            '<g transform="rotate(90.0,4030.0,2995.0)">'
+            '<rect x="4021.7323" y="2991.4567" width="16.5354" height="7.0866" '
+            'rx="3.5433" ry="3.5433"'
+        ) in self.svg
+        assert (
+            '<rect x="4023.11025" y="2993.0315" width="13.7795" height="3.937" '
+            'rx="1.9685" ry="1.9685"'
+        ) in self.svg
 
     def test_solidregion_cutout_fill_none(self) -> None:
         # cutout variant → fill="none" on a <path>
@@ -169,7 +177,7 @@ class TestSymbolC2685:
 
 
 class TestFootprintC2685:
-    """ARC, PAD ELLIPSE (w==h → circle), PAD RECT, SOLIDREGION layer-100 skip."""
+    """ARC, PAD ELLIPSE, PAD RECT, SOLIDREGION layer-100 skip."""
 
     @pytest.fixture(autouse=True)
     def _svg(self) -> None:
@@ -182,10 +190,8 @@ class TestFootprintC2685:
         # ARC → <path d="...">
         assert "<path " in self.svg
 
-    def test_ellipse_equal_renders_circle(self) -> None:
-        # ELLIPSE PAD with w==h → <circle> (circle branch, not <ellipse>)
-        assert "<circle " in self.svg
-        assert "<ellipse " not in self.svg
+    def test_ellipse_pad(self) -> None:
+        assert "<ellipse " in self.svg
 
     def test_rect_pad(self) -> None:
         assert "<rect " in self.svg
@@ -310,12 +316,19 @@ class TestSyntheticFootprintShapes:
         assert "<polygon " in svg
 
     def test_non_plated_pad_no_copper(self) -> None:
-        # is_plated = "N" → no copper fill, but drill hole still drawn if hole_r > 0
         svg = render_footprint_svg(
             _fp_result(["PAD~ELLIPSE~100~100~10~10~11~GND~1~2~0~0~gge1~0~~N"])
         )
-        # no copper circle/ellipse for non-plated pad (hole_r = 2)
-        assert "<circle " in svg  # drill hole still rendered
+        assert "<ellipse " not in svg
+        assert '<rect x="98.0" y="98.0" width="4.0" height="4.0" rx="2.0"' in svg
+
+    def test_polygon_pad_points_are_not_rotated_again(self) -> None:
+        pts = "90 95 110 95 110 105 90 105"
+        svg = render_footprint_svg(
+            _fp_result([f"PAD~POLYGON~100~100~10~20~1~GND~1~0~{pts}~90~gge1~0"])
+        )
+        assert "<polygon " in svg
+        assert "rotate(" not in svg
 
     def test_solidregion_npth(self) -> None:
         svg = render_footprint_svg(
@@ -335,12 +348,20 @@ class TestSyntheticFootprintShapes:
         )
         assert "<path " not in svg
 
-    def test_oval_pad_unequal(self) -> None:
-        # OVAL with w≠h → <ellipse>
+    def test_oval_pad_has_round_ends(self) -> None:
         svg = render_footprint_svg(
             _fp_result(["PAD~OVAL~100~100~10~6~1~GND~1~0~~0~gge1"])
         )
-        assert "<ellipse " in svg
+        assert '<rect x="95.0" y="97.0" width="10.0" height="6.0" rx="3.0"' in svg
+
+    @pytest.mark.parametrize(
+        ("rotation", "viewbox"), [("0", [94, 96, 12, 8]), ("90", [96, 94, 8, 12])]
+    )
+    def test_rotated_pad_extent(self, rotation: str, viewbox: list[float]) -> None:
+        svg = render_footprint_svg(
+            _fp_result([f"PAD~RECT~100~100~10~6~1~GND~1~0~~{rotation}~gge1"])
+        )
+        assert _viewbox(svg) == pytest.approx(viewbox)
 
     def test_empty_footprint_returns_valid_svg(self) -> None:
         svg = render_footprint_svg(_fp_result([]))
@@ -380,3 +401,19 @@ class TestSyntheticSymbolShapesExtra:
             )
         )
         assert "Visible" in svg
+
+
+class TestPathExtent:
+    """The viewBox covers the drawn path exactly, not its control points."""
+
+    def test_curve(self) -> None:
+        svg = render_symbol_svg(
+            _sym_result(["PT~M 0 0 C 0 10 10 10 10 0~#000000~1~0~none~p1~0"])
+        )
+        assert _viewbox(svg) == pytest.approx([-1, -1, 12, 9.5])
+
+    def test_arc(self) -> None:
+        svg = render_symbol_svg(
+            _sym_result(["A~M 10 0 A 10 10 0 1 0 0 10~~#000000~1~0~none~a1~0"])
+        )
+        assert _viewbox(svg) == pytest.approx([-11, -11, 22, 22])

@@ -52,6 +52,7 @@ from .parameters_easyeda import (
     EeSymbolRectangle,
     EeFootprint,
 )
+from .svg_path_parser import parse_svg_points
 
 
 # Characters illegal in KiCad LIB_IDs (lib_id.cpp: isLegalChar) or on the filesystem.
@@ -105,8 +106,10 @@ def convert_fields_to_types(
                 # It's Optional[T], get the non-None type
                 field_type = next((arg for arg in args if arg is not type(None)), str)
 
-        # Convert based on type
-        if field_type is float or field_type == "float":
+        # Convert based on type; fills are colors that __post_init__ evaluates
+        if key == "fill_color":
+            converted[key] = value
+        elif field_type is float or field_type == "float":
             converted[key] = _safe_float(value)
         elif field_type is int or field_type == "int":
             converted[key] = _safe_int(value)
@@ -722,10 +725,14 @@ class Easyeda3dModelImporter:
         ox, oy = self.canvas_origin_x, self.canvas_origin_y
         scale = self._CANVAS_SCALE
         for child in node.get("childNodes", []):
-            pts = child.get("attrs", {}).get("points", "").split()
-            for i in range(0, len(pts) - 1, 2):
-                xs.append((_safe_float(pts[i]) - ox) * scale)
-                ys.append(-(_safe_float(pts[i + 1]) - oy) * scale)
+            try:
+                points = parse_svg_points(child.get("attrs", {}).get("points", ""))
+            except ValueError as e:
+                logging.warning(f"Skipping 3D model outline points: {e}")
+                continue
+            for x, y in points:
+                xs.append((x - ox) * scale)
+                ys.append(-(y - oy) * scale)
         if not xs:
             return None
         return ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)

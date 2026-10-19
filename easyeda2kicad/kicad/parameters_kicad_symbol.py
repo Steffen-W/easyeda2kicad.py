@@ -8,6 +8,9 @@ import textwrap
 from dataclasses import dataclass, field, fields
 from enum import Enum, auto
 
+# Local imports
+from ..easyeda.svg_path_parser import BEZIER_SEGMENTS, Point, cubic_bezier_point
+
 
 # .kicad_sym file format versions — each constant marks a breaking schema change.
 # KiCad 6.0   baseline: arc start/mid/end, property id field
@@ -87,14 +90,13 @@ def sanitize_fields(name: str) -> str:
     return _ILLEGAL_SYMBOL_ID_RE.sub("_", name).replace(" ", "")
 
 
-def apply_text_style(text: str) -> str:
-    if text.endswith("#"):
-        text = f"~{{{text[:-1]}}}"
-    return text
+# A word ending in "#", the EasyEDA notation for an active-low signal
+_ACTIVE_LOW_RE = re.compile(r"([^\s/(){}~#]+)#(?=$|[\s/()])")
 
 
-def apply_pin_name_style(pin_name: str) -> str:
-    return "/".join(apply_text_style(text=txt) for txt in pin_name.split("/"))
+def overbar_active_low(text: str) -> str:
+    """Write active-low words ("CS#") with a KiCad overbar ("~{CS}")."""
+    return _ACTIVE_LOW_RE.sub(r"~{\1}", text)
 
 
 def _make_property(
@@ -332,7 +334,7 @@ class KiSymbolPin:
             # KiCad pin orientation is offset by 180° from EasyEDA's convention
             orientation=(180 + self.orientation) % 360,
             pin_length=self.length,
-            pin_name=apply_pin_name_style(pin_name=self.name),
+            pin_name=self.name,
             name_size=KiSymbolDefaults.PIN_NAME_SIZE.value,
             pin_num=self.number,
             num_size=KiSymbolDefaults.PIN_NUM_SIZE.value,
@@ -367,9 +369,8 @@ class KiSymbolRectangle:
 # ---------------- POLYGON ----------------
 @dataclass
 class KiSymbolPolygon:
-    points: list[list[float]] = field(default_factory=list)
-    points_number: int = 0
-    is_closed: bool = False
+    points: list[Point] = field(default_factory=list)
+    filled: bool = False
 
     def export(self, version: int = KICAD_SYM_VERSION_20211014) -> str:
         return """
@@ -384,7 +385,7 @@ class KiSymbolPolygon:
                 [f"(xy {pts[0]:.2f} {pts[1]:.2f})" for pts in self.points]
             ),
             line_width=KiSymbolDefaults.DEFAULT_BOX_LINE_WIDTH.value,
-            fill=KiBoxFill.background.name if self.is_closed else KiBoxFill.none.name,
+            fill=KiBoxFill.background.name if self.filled else KiBoxFill.none.name,
         )
 
 
@@ -453,26 +454,19 @@ class KiSymbolArc:
 
 
 # ---------------- BEZIER CURVE ----------------
-# Polyline segments per curve in formats without (bezier ...)
-BEZIER_POLYLINE_SEGMENTS = 8
-
-
 @dataclass
 class KiSymbolBezier:
-    points: list[list[float]] = field(default_factory=list)
-    points_number: int = 0
-    is_closed: bool = False
+    points: list[Point] = field(default_factory=list)  # start, c1, c2, end
 
     def export(self, version: int = KICAD_SYM_VERSION_20211014) -> str:
         fmt_pts = " ".join(f"(xy {p[0]:.2f} {p[1]:.2f})" for p in self.points)
-        fill = KiBoxFill.background.name if self.is_closed else KiBoxFill.none.name
         lw = KiSymbolDefaults.DEFAULT_BOX_LINE_WIDTH.value
         if version >= KICAD_SYM_VERSION_20220914:
             return f"""
             (bezier
               (pts {fmt_pts})
               (stroke (width {lw}) (type default))
-              (fill (type {fill}))
+              (fill (type none))
             )"""
         # Formats before 20220914 have no (bezier ...).
         fmt_pts = " ".join(f"(xy {x:.2f} {y:.2f})" for x, y in self.approximate())
@@ -480,22 +474,18 @@ class KiSymbolBezier:
             (polyline
               (pts {fmt_pts})
               (stroke (width {lw}) (type default))
-              (fill (type {fill}))
+              (fill (type none))
             )"""
 
-    def approximate(self) -> list[list[float]]:
-        """Points along the cubic Bézier curve [start, c1, c2, end]."""
+    def approximate(self) -> list[Point]:
+        """Points along the curve, BEZIER_SEGMENTS line segments apart."""
         if len(self.points) != 4:
             raise ValueError(f"cubic Bézier needs 4 points, got {len(self.points)}")
-        (x0, y0), (x1, y1), (x2, y2), (x3, y3) = self.points
-        points = []
-        for i in range(BEZIER_POLYLINE_SEGMENTS + 1):
-            t = i / BEZIER_POLYLINE_SEGMENTS
-            a, b, c, d = (1 - t) ** 3, 3 * (1 - t) ** 2 * t, 3 * (1 - t) * t**2, t**3
-            points.append(
-                [a * x0 + b * x1 + c * x2 + d * x3, a * y0 + b * y1 + c * y2 + d * y3]
-            )
-        return points
+        start, control1, control2, end = self.points
+        return [
+            cubic_bezier_point(start, control1, control2, end, i / BEZIER_SEGMENTS)
+            for i in range(BEZIER_SEGMENTS + 1)
+        ]
 
 
 # ---------------- TEXT ----------------

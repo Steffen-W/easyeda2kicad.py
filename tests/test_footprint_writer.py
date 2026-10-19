@@ -9,22 +9,14 @@ from easyeda2kicad.easyeda.easyeda_importer import (
     EasyedaFootprintImporter,
     _sanitize_footprint_name,
 )
+from easyeda2kicad.easyeda.svg_path_parser import BEZIER_SEGMENTS, Point, SvgArc
 from easyeda2kicad.kicad.export_kicad_footprint import (
     ExporterFootprintKicad,
+    _arc_angle,
     angle_to_ki,
-    compute_arc,
     drill_to_ki,
     fp_to_ki,
 )
-
-TOL = 1e-6
-
-
-def on_circle(
-    cx: float, cy: float, r: float, x: float, y: float, tol: float = TOL
-) -> bool:
-    return abs(math.sqrt((x - cx) ** 2 + (y - cy) ** 2) - r) < tol
-
 
 # ---------------------------------------------------------------------------
 # fp_to_ki
@@ -110,54 +102,29 @@ class TestAngleToKi:
 
 
 # ---------------------------------------------------------------------------
-# compute_arc
+# _arc_angle
 # ---------------------------------------------------------------------------
 
 
-class TestComputeArc:
-    def test_quarter_circle_center(self) -> None:
-        # Quarter circle on unit circle: (1,0) → (0,1), sweep=True
-        cx, cy, _ = compute_arc(1, 0, 1, 1, 0, False, True, 0, 1)
-        assert on_circle(cx, cy, 1.0, 1.0, 0.0)
-        assert on_circle(cx, cy, 1.0, 0.0, 1.0)
+def _angle(large_arc: bool, sweep: bool, start: Point, end: Point) -> float:
+    return _arc_angle(
+        SvgArc(1, 1, 0, large_arc, sweep, end).geometry(start).sweep_angle
+    )
 
-    def test_semicircle_extent_180(self) -> None:
-        # Half circle: (-1,0) → (1,0), r=1, sweep=True → extent ≈ 180
-        _cx, _cy, extent = compute_arc(-1, 0, 1, 1, 0, False, True, 1, 0)
-        assert abs(abs(extent) - 180.0) < 1.0
 
-    def test_large_arc_flag_flips_extent(self) -> None:
-        # Same endpoints, large_arc changes which arc is taken
-        _, _, e_small = compute_arc(1, 0, 1, 1, 0, False, True, 0, 1)
-        _, _, e_large = compute_arc(1, 0, 1, 1, 0, True, True, 0, 1)
-        assert abs(e_small) < abs(e_large)
+class TestArcAngle:
+    def test_semicircle(self) -> None:
+        assert abs(_angle(False, True, (-1, 0), (1, 0))) == pytest.approx(180)
 
-    def test_sweep_flag_inverts_extent_sign(self) -> None:
-        _, _, e1 = compute_arc(1, 0, 1, 1, 0, False, True, 0, 1)
-        _, _, e2 = compute_arc(1, 0, 1, 1, 0, False, False, 0, 1)
-        assert e1 * e2 < 0  # opposite signs
+    def test_large_arc_flag_selects_the_longer_arc(self) -> None:
+        assert _angle(False, True, (1, 0), (0, 1)) == pytest.approx(-90)
+        assert _angle(True, True, (1, 0), (0, 1)) == pytest.approx(-270)
 
-    def test_small_radii_scaled_up(self) -> None:
-        # Radii too small for chord distance → must be scaled; should not crash
-        cx, cy, extent = compute_arc(0, 0, 0.01, 0.01, 0, False, True, 10, 0)
-        assert math.isfinite(cx) and math.isfinite(cy) and math.isfinite(extent)
+    def test_sweep_flag_inverts_the_sign(self) -> None:
+        assert _angle(False, False, (1, 0), (0, 1)) == pytest.approx(90)
 
-    def test_zero_radius_is_rejected(self) -> None:
-        # SVG draws such an arc as a straight line, which has no center
-        with pytest.raises(ValueError, match="zero radius"):
-            compute_arc(0, 0, 0, 1, 0, False, True, 10, 0)
-
-    def test_coincident_points_no_crash(self) -> None:
-        # Start == end: degenerate case, just must not raise
-        cx, cy, extent = compute_arc(1, 0, 1, 1, 0, False, True, 1, 0)
-        assert math.isfinite(cx) and math.isfinite(cy) and math.isfinite(extent)
-
-    def test_result_center_equidistant_from_endpoints(self) -> None:
-        # Center must be equidistant from both endpoints (= on the circle)
-        cx, cy, _ = compute_arc(0, 1, 1, 1, 0, False, True, 1, 0)
-        d_start = math.sqrt((1 - cx) ** 2 + (0 - cy) ** 2)
-        d_end = math.sqrt((1 - cx) ** 2 + (0 - cy) ** 2)
-        assert abs(d_start - d_end) < TOL
+    def test_full_circle_keeps_its_extent(self) -> None:
+        assert _arc_angle(math.tau) == pytest.approx(-360)
 
 
 # ---------------------------------------------------------------------------
@@ -165,20 +132,64 @@ class TestComputeArc:
 # ---------------------------------------------------------------------------
 
 
-def _export_arc(tmp_path: Path, path: str) -> str:
+def _export(tmp_path: Path, *shapes: str) -> str:
     cad = {
         "packageDetail": {
-            "title": "ARC",
+            "title": "FP",
             "dataStr": {
-                "head": {"x": 400, "y": 300, "c_para": {"package": "ARC"}},
-                "shape": [f"ARC~1~3~~{path}~~gge1~0"],
+                "head": {"x": 400, "y": 300, "c_para": {"package": "FP"}},
+                "shape": list(shapes),
             },
         }
     }
     footprint = EasyedaFootprintImporter(cad).get_footprint()
-    output = tmp_path / "ARC.kicad_mod"
+    output = tmp_path / "FP.kicad_mod"
     ExporterFootprintKicad(footprint).export(str(output), model_3d_path="")
     return output.read_text(encoding="utf-8")
+
+
+def _export_arc(tmp_path: Path, path: str) -> str:
+    return _export(tmp_path, f"ARC~1~3~~{path}~~gge1~0")
+
+
+def test_pad_number_spaces_become_underscores(tmp_path: Path) -> None:
+    pad = "PAD~RECT~410~300~10~10~1~~A 1~0~~0~gge1~0~~Y~0"
+    assert "(pad A_1 smd rect" in _export(tmp_path, pad)
+
+
+@pytest.mark.parametrize("points", ["400 300", ""])
+def test_track_with_fewer_than_two_points_is_skipped(
+    tmp_path: Path, points: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert "(fp_line" not in _export(tmp_path, f"TRACK~1~3~~{points}~gge1~0")
+    assert "Skipping track with" in caplog.text
+
+
+class TestHoles:
+    def test_hole_is_not_plated(self, tmp_path: Path) -> None:
+        content = _export(tmp_path, "HOLE~410~300~2~gge1~0")
+        assert '(pad "" np_thru_hole circle (at 2.54 0.00) (size 1.02 1.02)' in content
+
+    @pytest.mark.parametrize(
+        ("plated", "expected"),
+        [
+            (
+                "Y",
+                "(pad 1 thru_hole circle (at 2.54 0.00 0.00) (size 2.540 2.540) "
+                "(layers *.Cu *.Mask)",
+            ),
+            (
+                "N",
+                "(pad 1 np_thru_hole circle (at 2.54 0.00 0.00) (size 2.540 2.540) "
+                "(layers *.Mask)",
+            ),
+        ],
+    )
+    def test_pad_hole_follows_plating(
+        self, tmp_path: Path, plated: str, expected: str
+    ) -> None:
+        pad = f"PAD~ELLIPSE~410~300~10~10~11~~1~2~~0~gge1~0~~{plated}~0"
+        assert expected in _export(tmp_path, pad)
 
 
 class TestArcExport:
@@ -193,6 +204,35 @@ class TestArcExport:
         content = _export_arc(tmp_path, "M 400 300 A 0 10 0 0 1 410 300")
         assert "(fp_arc" not in content
         assert "(fp_line (start 0.00 0.00) (end 2.54 0.00) (layer F.SilkS)" in content
+
+    def test_relative_path(self, tmp_path: Path) -> None:
+        relative = _export_arc(tmp_path, "M 400 -300 a 10 10 0 0 1 10 10")
+        absolute = _export_arc(tmp_path, "M 400 -300 A 10 10 0 0 1 410 -290")
+        assert relative == absolute
+
+    def test_lines_and_curves_in_the_path_become_tracks(self, tmp_path: Path) -> None:
+        content = _export_arc(
+            tmp_path, "M 400 300 A 10 10 0 0 1 410 310 L 420 310 Q 425 315 430 310"
+        )
+        assert content.count("(fp_arc") == 1
+        assert "(fp_line (start 2.54 2.54) (end 5.08 2.54)" in content
+        assert content.count("(fp_line") == 1 + BEZIER_SEGMENTS
+
+    def test_elliptical_arc_becomes_a_track(self, tmp_path: Path) -> None:
+        content = _export_arc(tmp_path, "M 400 300 A 10 5 0 0 1 420 300")
+        assert "(fp_arc" not in content
+        assert content.count("(fp_line") == 18
+
+    def test_tiny_radius_is_scaled_up_to_the_chord(self, tmp_path: Path) -> None:
+        content = _export_arc(tmp_path, "M 400 300 A 1e-6 1e-6 0 0 1 410 300")
+        assert "(fp_arc (start 1.27 0.00) (end 2.54 0.00) (angle -180.00)" in content
+
+    def test_path_without_segments_is_skipped(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        content = _export_arc(tmp_path, "M 400 300")
+        assert "(fp_arc" not in content and "(fp_line" not in content
+        assert "without segments" in caplog.text
 
     @pytest.mark.parametrize(
         "path", ["M 400 300 A 10 10 0 2 1 410 300", "M 400 300 A 10 10 0 0 1 410"]

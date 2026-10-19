@@ -3,10 +3,7 @@ from __future__ import annotations
 # Global imports
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional, Union
-
-# Local imports
-from .svg_path_parser import parse_svg_path
+from typing import Optional, Union
 
 
 # Safe conversion helpers – used by all EasyEDA dataclass __post_init__ methods.
@@ -39,11 +36,18 @@ def _safe_bool(
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        return value.lower() in ("true", "1", "yes", "on", "show")
+        return value.lower() in ("true", "1", "y", "yes", "on", "show")
     try:
         return bool(int(value))
     except (ValueError, TypeError):
         return default
+
+
+def _safe_fill(value: Union[str, bool, None]) -> bool:
+    """Whether an EasyEDA fill (a color, "none" or empty) fills the shape."""
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "none")
+    return _safe_bool(value)
 
 
 class EasyedaPinType(Enum):
@@ -113,12 +117,8 @@ class EeSymbolPinDot:
 
 @dataclass
 class EeSymbolPinPath:
-    path: str
+    path: str  # SVG path data
     color: str
-
-    def __post_init__(self) -> None:
-        if isinstance(self.path, str):
-            self.path = self.path.replace("v", "h")
 
 
 @dataclass
@@ -159,7 +159,7 @@ class EeSymbolPinDotBis:
 @dataclass
 class EeSymbolPinClock:
     is_displayed: bool
-    path: str
+    path: str  # SVG path data
 
     def __post_init__(self) -> None:
         self.is_displayed = _safe_bool(self.is_displayed, True)
@@ -232,18 +232,13 @@ class EeSymbolCircle:
         self.center_y = _safe_float(self.center_y)
         self.radius = _safe_float(self.radius)
         self.is_locked = _safe_bool(self.is_locked)
-        if isinstance(self.fill_color, str):
-            self.fill_color = bool(
-                self.fill_color and self.fill_color.lower() != "none"
-            )
-        else:
-            self.fill_color = _safe_bool(self.fill_color)
+        self.fill_color = _safe_fill(self.fill_color)
 
 
 # ---------------- ARC ----------------
 @dataclass
 class EeSymbolArc:
-    path: list[Any]
+    path: str  # SVG path data
     helper_dots: str
     stroke_color: str
     stroke_width: str
@@ -255,14 +250,7 @@ class EeSymbolArc:
     def __post_init__(self) -> None:
         # Safe conversions for all fields
         self.is_locked = _safe_bool(self.is_locked)
-        if isinstance(self.fill_color, str):
-            self.fill_color = bool(
-                self.fill_color and self.fill_color.lower() != "none"
-            )
-        else:
-            self.fill_color = _safe_bool(self.fill_color)
-        if isinstance(self.path, str):
-            self.path = parse_svg_path(svg_path=self.path)
+        self.fill_color = _safe_fill(self.fill_color)
 
 
 @dataclass
@@ -285,18 +273,13 @@ class EeSymbolEllipse:
         self.radius_x = _safe_float(self.radius_x)
         self.radius_y = _safe_float(self.radius_y)
         self.is_locked = _safe_bool(self.is_locked)
-        if isinstance(self.fill_color, str):
-            self.fill_color = bool(
-                self.fill_color and self.fill_color.lower() != "none"
-            )
-        else:
-            self.fill_color = _safe_bool(self.fill_color)
+        self.fill_color = _safe_fill(self.fill_color)
 
 
 # ---------------- POLYLINE ----------------
 @dataclass
 class EeSymbolPolyline:
-    points: str
+    points: str  # point list "x1 y1 x2 y2 ..."
     stroke_color: str
     stroke_width: str
     stroke_style: str
@@ -307,12 +290,7 @@ class EeSymbolPolyline:
     def __post_init__(self) -> None:
         # Safe conversions for all fields
         self.is_locked = _safe_bool(self.is_locked)
-        if isinstance(self.fill_color, str):
-            self.fill_color = bool(
-                self.fill_color and self.fill_color.lower() != "none"
-            )
-        else:
-            self.fill_color = _safe_bool(self.fill_color)
+        self.fill_color = _safe_fill(self.fill_color)
 
 
 # ---------------- POLYGON ----------------
@@ -323,7 +301,7 @@ class EeSymbolPolygon(EeSymbolPolyline):
 
 @dataclass
 class EeSymbolPath:
-    paths: str
+    path: str  # SVG path data
     stroke_color: str
     stroke_width: str
     stroke_style: str
@@ -334,12 +312,7 @@ class EeSymbolPath:
     def __post_init__(self) -> None:
         # Safe conversions for all fields
         self.is_locked = _safe_bool(self.is_locked)
-        if isinstance(self.fill_color, str):
-            self.fill_color = bool(
-                self.fill_color and self.fill_color.lower() != "none"
-            )
-        else:
-            self.fill_color = _safe_bool(self.fill_color)
+        self.fill_color = _safe_fill(self.fill_color)
 
 
 # ---------------- TEXT ----------------
@@ -424,7 +397,7 @@ class EeFootprintPad:
     net: str
     number: str
     hole_radius: float
-    points: str
+    points: str  # point list "x1 y1 x2 y2 ..."
     rotation: float
     id: str
     hole_length: float
@@ -450,7 +423,7 @@ class EeFootprintTrack:
     stroke_width: float
     layer_id: int
     net: str
-    points: str
+    points: str  # point list "x1 y1 x2 y2 ..."
     id: str
     is_locked: bool
 
@@ -538,7 +511,7 @@ class EeFootprintArc:
     stroke_width: float
     layer_id: int
     net: str
-    path: str
+    path: str  # SVG path data
     helper_dots: str
     id: str
     is_locked: bool
@@ -552,7 +525,7 @@ class EeFootprintArc:
 @dataclass
 class EeFootprintSolidRegion:
     layer_id: int
-    path: str  # SVG path string
+    path: str  # SVG path data
     region_type: str  # "solid", "cutout", "npth"
 
     def __post_init__(self) -> None:

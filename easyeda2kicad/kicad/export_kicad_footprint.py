@@ -2,18 +2,17 @@ from __future__ import annotations
 
 # Global imports
 import logging
-from math import ceil, copysign, degrees, isnan
+from math import degrees, isnan
 from pathlib import Path
 
 # Local imports
 from ..easyeda.parameters_easyeda import EeFootprint, EeFootprintSolidRegion
 from ..easyeda.svg_path_parser import (
-    SvgPathEllipticalArc,
-    SvgPathMoveTo,
-    parse_svg_args,
+    Point,
+    SvgArc,
+    SvgSubpath,
     parse_svg_path,
-    split_svg_path,
-    svg_arc_geometry,
+    parse_svg_points,
 )
 from .parameters_kicad_footprint import (
     KI_ARC,
@@ -53,31 +52,9 @@ from .parameters_kicad_footprint import (
 # ---------------------------------------
 
 
-def compute_arc(
-    start_x: float,
-    start_y: float,
-    radius_x: float,
-    radius_y: float,
-    angle: float,
-    large_arc_flag: bool,
-    sweep_flag: bool,
-    end_x: float,
-    end_y: float,
-) -> tuple[float, float, float]:
-    """Center and angular extent (degrees, KiCad orientation) of an SVG arc."""
-    arc = svg_arc_geometry(
-        sx=start_x,
-        sy=start_y,
-        ex=end_x,
-        ey=end_y,
-        rx=radius_x,
-        ry=radius_y,
-        x_rotation_deg=angle,
-        large_arc=large_arc_flag,
-        sweep=sweep_flag,
-    )
-    extent = degrees(arc.sweep_angle)
-    return arc.center_x, arc.center_y, -copysign(abs(extent) % 360, extent)
+def _arc_angle(sweep: float) -> float:
+    """KiCad angle in degrees of an arc with the given sweep angle in radians."""
+    return -degrees(sweep)
 
 
 # ---------------------------------------
@@ -129,6 +106,23 @@ def angle_to_ki(rotation: float | str) -> float:
     return 0.0
 
 
+def _layer(layer_id: int) -> str:
+    """KiCad layer of an EasyEDA layer id; F.Fab for unknown ids."""
+    return KI_LAYERS.get(layer_id, "F.Fab")
+
+
+def _track(points: list[Point], layers: str, stroke_width: float) -> KiFootprintTrack:
+    """Track of line segments through the points (in mm)."""
+    return KiFootprintTrack(
+        points_start_x=[x for x, _ in points[:-1]],
+        points_start_y=[y for _, y in points[:-1]],
+        points_end_x=[x for x, _ in points[1:]],
+        points_end_y=[y for _, y in points[1:]],
+        stroke_width=stroke_width,
+        layers=layers,
+    )
+
+
 # ---------------------------------------
 
 # Layers whose "solid" SOLIDREGIONs are imported ("npth" ones are board cutouts).
@@ -141,74 +135,25 @@ _NPTH_REGION_LAYER = "Edge.Cuts"
 # Regions on these layers are exported as outlines, all others as filled polygons.
 _OUTLINE_REGION_LAYERS = ("F.CrtYd", _NPTH_REGION_LAYER)
 
-# Maximum angle per line segment when flattening arcs
-_ARC_SEGMENT_DEG = 10.0
-
 
 def _parse_solid_region_path(
     path: str, bbox_x_px: float, bbox_y_px: float
-) -> list[tuple[float, float]]:
-    """Convert an EasyEDA SVG path string to a list of (x, y) mm points.
+) -> list[Point]:
+    """Contour of a region path in mm, with curves and arcs flattened and
+    consecutive duplicate points dropped.
 
-    Supports what EasyEDA writes: one subpath of absolute M, L, H, V and A
-    commands, each with any number of coordinate sets (extra pairs after M are
-    line-tos, as in SVG), optionally closed by a final Z. Arcs are flattened
-    into segments of at most _ARC_SEGMENT_DEG. Consecutive duplicate points
-    are dropped.
     Subtracts bbox in pixel space before converting to mm to avoid
     float rounding artifacts from subtracting two independently rounded values.
-    Raises ValueError for anything else: other or relative commands, several
-    subpaths and the malformed arguments rejected by parse_svg_args.
+    Raises ValueError for malformed paths and paths with several subpaths.
     """
-    points: list[tuple[float, float]] = []
-    cur_x = cur_y = 0.0
-    closed = False
-
-    def add_point() -> None:
-        point = (fp_to_ki(cur_x - bbox_x_px), fp_to_ki(cur_y - bbox_y_px))
+    subpaths = parse_svg_path(path)
+    if len(subpaths) != 1:
+        raise ValueError(f"path must consist of one subpath, got {len(subpaths)}")
+    points: list[Point] = []
+    for x, y in subpaths[0].flatten():
+        point = (fp_to_ki(x - bbox_x_px), fp_to_ki(y - bbox_y_px))
         if not points or points[-1] != point:
             points.append(point)
-
-    for cmd, text in split_svg_path(path):
-        if cmd not in "MLHVAZ":
-            raise ValueError(f"path command '{cmd}' is not supported")
-        coordinate_sets = parse_svg_args(cmd, text)
-        if closed:
-            raise ValueError("Z must be the last path command")
-        if (cmd == "M") == bool(points):
-            raise ValueError("path must consist of exactly one subpath starting with M")
-        if cmd == "Z":
-            closed = True
-        for values in coordinate_sets:
-            if cmd == "H":
-                cur_x = values[0]
-            elif cmd == "V":
-                cur_y = values[0]
-            else:
-                end_x, end_y = values[-2], values[-1]
-                # SVG draws an arc with a zero radius as a straight line
-                if cmd == "A" and values[0] and values[1]:
-                    arc = svg_arc_geometry(
-                        sx=cur_x,
-                        sy=cur_y,
-                        ex=end_x,
-                        ey=end_y,
-                        rx=values[0],
-                        ry=values[1],
-                        x_rotation_deg=values[2],
-                        large_arc=bool(values[3]),
-                        sweep=bool(values[4]),
-                    )
-                    # Rounding keeps float noise (90.0000001°) from adding a segment
-                    steps = ceil(
-                        round(abs(degrees(arc.sweep_angle)) / _ARC_SEGMENT_DEG, 6)
-                    )
-                    for step in range(1, steps):
-                        cur_x, cur_y = arc.point(step / steps)
-                        add_point()
-                cur_x, cur_y = end_x, end_y
-            add_point()
-
     return points
 
 
@@ -233,12 +178,12 @@ def _convert_solid_region(
     try:
         points = _parse_solid_region_path(ee_region.path, bbox_x, bbox_y)
     except ValueError as e:
-        logging.warning(f"SOLIDREGION on layer {ee_region.layer_id}: skipping, {e}")
+        logging.warning(f"Skipping SOLIDREGION on layer {ee_region.layer_id}: {e}")
         return None
     if len(points) < 3:
         logging.warning(
-            f"SOLIDREGION on layer {ee_region.layer_id}: "
-            f"skipping, only {len(points)} point(s) parsed"
+            f"Skipping SOLIDREGION on layer {ee_region.layer_id} "
+            f"with {len(points)} point(s)"
         )
         return None
 
@@ -258,6 +203,13 @@ class ExporterFootprintKicad:
         else:
             self.generate_kicad_footprint()
 
+    def _ki_point(self, point: Point) -> Point:
+        """EasyEDA footprint pixel point → KiCad mm, relative to the bbox."""
+        return (
+            fp_to_ki(point[0]) - self.input.bbox.x,
+            fp_to_ki(point[1]) - self.input.bbox.y,
+        )
+
     def generate_kicad_footprint(self) -> None:
         bbox_x_px = self.input.bbox.x_px
         bbox_y_px = self.input.bbox.y_px
@@ -272,12 +224,15 @@ class ExporterFootprintKicad:
         )
 
         if self.input.model_3d is not None:
+            # The model offset is in mm with y up, like the EasyEDA translation;
+            # rounded to the written 0.001 mm, adding 0.0 turns -0.0 into 0.0
+            offset = self.input.model_3d.translation
             ki_3d_model_info = Ki3dModel(
                 name=self.input.model_3d.name,
                 translation=Ki3dModelBase(
-                    x=0.0,
-                    y=0.0,
-                    z=0.0,
+                    x=round(offset.x, 3) + 0.0,
+                    y=round(offset.y, 3) + 0.0,
+                    z=round(offset.z, 3) + 0.0,
                 ),
                 rotation=Ki3dModelBase(
                     x=(360 - self.input.model_3d.rotation.x) % 360,
@@ -293,8 +248,16 @@ class ExporterFootprintKicad:
 
         # For pads
         for ee_pad in self.input.pads:
+            if ee_pad.hole_radius <= 0:
+                pad_type, layers = "smd", KI_PAD_LAYER.get(ee_pad.layer_id, "")
+            elif ee_pad.is_plated:
+                pad_type = "thru_hole"
+                layers = KI_PAD_LAYER_THT.get(ee_pad.layer_id, "")
+            else:
+                # A non-plated hole has no copper
+                pad_type, layers = "np_thru_hole", "*.Mask"
             ki_pad = KiFootprintPad(
-                type="thru_hole" if ee_pad.hole_radius > 0 else "smd",
+                type=pad_type,
                 shape=(
                     KI_PAD_SHAPE[ee_pad.shape]
                     if ee_pad.shape in KI_PAD_SHAPE
@@ -304,10 +267,9 @@ class ExporterFootprintKicad:
                 pos_y=ee_pad.center_y - self.input.bbox.y,
                 width=max(ee_pad.width, 0.01),
                 height=max(ee_pad.height, 0.01),
-                layers=(
-                    KI_PAD_LAYER if ee_pad.hole_radius <= 0 else KI_PAD_LAYER_THT
-                ).get(ee_pad.layer_id, ""),
-                number=ee_pad.number,
+                layers=layers,
+                # KiCad pad numbers cannot contain spaces
+                number=ee_pad.number.replace(" ", "_"),
                 drill="",
                 orientation=angle_to_ki(ee_pad.rotation),
                 polygon="",
@@ -325,14 +287,13 @@ class ExporterFootprintKicad:
                 )
                 ki_pad.number = normalized
 
-            # For custom polygon
-            is_custom_shape = ki_pad.shape == "custom"
-            point_list = [fp_to_ki(point) for point in ee_pad.points.split()]
-            if is_custom_shape:
-                if len(point_list) <= 0:
-                    logging.warning(
-                        f"PAD ${ee_pad.id} is a polygon, but has no points defined"
-                    )
+            if ki_pad.shape == "custom":
+                try:
+                    points = parse_svg_points(ee_pad.points)
+                    if not points:
+                        raise ValueError("no points defined")
+                except ValueError as e:
+                    logging.warning(f"Skipping polygon of pad {ee_pad.id}: {e}")
                 else:
                     # Set the pad width and height to the smallest value allowed by KiCad.
                     # KiCad tries to draw a pad that forms the base of the polygon,
@@ -347,11 +308,8 @@ class ExporterFootprintKicad:
 
                     # Generate polygon with coordinates relative to the base pad's position.
                     path = "".join(
-                        "(xy {:.6f} {:.6f})".format(
-                            point_list[i] - self.input.bbox.x - ki_pad.pos_x,
-                            point_list[i + 1] - self.input.bbox.y - ki_pad.pos_y,
-                        )
-                        for i in range(0, len(point_list), 2)
+                        "(xy {:.6f} {:.6f})".format(x - ki_pad.pos_x, y - ki_pad.pos_y)
+                        for x, y in map(self._ki_point, points)
                     )
                     ki_pad.polygon = (
                         "\n\t\t(primitives \n\t\t\t(gr_poly \n\t\t\t\t(pts"
@@ -362,24 +320,21 @@ class ExporterFootprintKicad:
 
         # For tracks
         for ee_track in self.input.tracks:
-            ki_track = KiFootprintTrack(
-                layers=(
-                    KI_LAYERS[ee_track.layer_id]
-                    if ee_track.layer_id in KI_LAYERS
-                    else "F.Fab"
-                ),
-                stroke_width=max(ee_track.stroke_width, 0.01),
+            try:
+                points = parse_svg_points(ee_track.points)
+            except ValueError as e:
+                logging.warning(f"Skipping track: {e}")
+                continue
+            if len(points) < 2:
+                logging.warning(f"Skipping track with {len(points)} point(s)")
+                continue
+            self.output.tracks.append(
+                _track(
+                    [self._ki_point(point) for point in points],
+                    _layer(ee_track.layer_id),
+                    max(ee_track.stroke_width, 0.01),
+                )
             )
-
-            # Generate line
-            point_list = [fp_to_ki(point) for point in ee_track.points.split()]
-            for i in range(0, len(point_list) - 2, 2):
-                ki_track.points_start_x.append(point_list[i] - self.input.bbox.x)
-                ki_track.points_start_y.append(point_list[i + 1] - self.input.bbox.y)
-                ki_track.points_end_x.append(point_list[i + 2] - self.input.bbox.x)
-                ki_track.points_end_y.append(point_list[i + 3] - self.input.bbox.y)
-
-            self.output.tracks.append(ki_track)
 
         # For holes
         for ee_hole in self.input.holes:
@@ -409,11 +364,7 @@ class ExporterFootprintKicad:
                 cy=ee_circle.cy - self.input.bbox.y,
                 end_x=0.0,
                 end_y=0.0,
-                layers=(
-                    KI_LAYERS[ee_circle.layer_id]
-                    if ee_circle.layer_id in KI_LAYERS
-                    else "F.Fab"
-                ),
+                layers=_layer(ee_circle.layer_id),
                 stroke_width=max(ee_circle.stroke_width, 0.01),
             )
             ki_circle.end_x = ki_circle.cx + ee_circle.radius
@@ -423,11 +374,7 @@ class ExporterFootprintKicad:
         # For rectangles
         for ee_rectangle in self.input.rectangles:
             ki_rectangle = KiFootprintRectangle(
-                layers=(
-                    KI_LAYERS[ee_rectangle.layer_id]
-                    if ee_rectangle.layer_id in KI_LAYERS
-                    else "F.Fab"
-                ),
+                layers=_layer(ee_rectangle.layer_id),
                 stroke_width=max(ee_rectangle.stroke_width, 0.01),
             )
 
@@ -465,61 +412,46 @@ class ExporterFootprintKicad:
 
         # For arcs
         for ee_arc in self.input.arcs:
-            arc_path = parse_svg_path(ee_arc.path)
-            if (
-                len(arc_path) < 2
-                or not isinstance(arc_path[0], SvgPathMoveTo)
-                or not isinstance(arc_path[1], SvgPathEllipticalArc)
-            ):
-                logging.warning("Skipping arc with unexpected SVG path structure")
+            try:
+                subpaths = parse_svg_path(ee_arc.path)
+            except ValueError as e:
+                logging.warning(f"Skipping arc: {e}")
                 continue
-            svg_start, svg_arc = arc_path[0], arc_path[1]
-            start_x = fp_to_ki(svg_start.start_x) - self.input.bbox.x
-            start_y = fp_to_ki(svg_start.start_y) - self.input.bbox.y
-            end_x = fp_to_ki(svg_arc.end_x) - self.input.bbox.x
-            end_y = fp_to_ki(svg_arc.end_y) - self.input.bbox.y
-            rx = fp_to_ki(svg_arc.radius_x)
-            ry = fp_to_ki(svg_arc.radius_y)
-            layers = (
-                KI_LAYERS[ee_arc.layer_id] if ee_arc.layer_id in KI_LAYERS else "F.Fab"
-            )
+            if not any(subpath.segments for subpath in subpaths):
+                logging.warning(f"Skipping arc {ee_arc.path!r} without segments")
+                continue
+            layers = _layer(ee_arc.layer_id)
             stroke_width = max(ee_arc.stroke_width, 0.01)
-
-            # SVG draws an arc with a zero radius as a straight line
-            if rx == 0 or ry == 0:
-                self.output.tracks.append(
-                    KiFootprintTrack(
-                        points_start_x=[start_x],
-                        points_start_y=[start_y],
-                        points_end_x=[end_x],
-                        points_end_y=[end_y],
-                        stroke_width=stroke_width,
-                        layers=layers,
+            for subpath in subpaths:
+                # Segments between circular arcs, each run flattened to a track
+                runs = [[subpath.start]]
+                for start, segment in subpath.walk():
+                    circle = None
+                    if isinstance(segment, SvgArc):
+                        circle = segment.geometry(start).circle()
+                    if circle is None:
+                        runs[-1] += SvgSubpath(start, [segment]).flatten()[1:]
+                        continue
+                    center, sweep = circle
+                    cx, cy = self._ki_point(center)
+                    end_x, end_y = self._ki_point(segment.end)
+                    self.output.arcs.append(
+                        KiFootprintArc(
+                            start_x=cx,
+                            start_y=cy,
+                            end_x=end_x,
+                            end_y=end_y,
+                            angle=_arc_angle(sweep),
+                            layers=layers,
+                            stroke_width=stroke_width,
+                        )
                     )
-                )
-                continue
-            cx, cy, extent = compute_arc(
-                start_x,
-                start_y,
-                rx,
-                ry,
-                svg_arc.x_axis_rotation,
-                svg_arc.flag_large_arc,
-                svg_arc.flag_sweep,
-                end_x,
-                end_y,
-            )
-
-            ki_arc = KiFootprintArc(
-                start_x=cx,
-                start_y=cy,
-                end_x=end_x,
-                end_y=end_y,
-                angle=extent,
-                layers=layers,
-                stroke_width=stroke_width,
-            )
-            self.output.arcs.append(ki_arc)
+                    runs.append([segment.end])
+                self.output.tracks += [
+                    _track([self._ki_point(p) for p in run], layers, stroke_width)
+                    for run in runs
+                    if len(run) > 1
+                ]
 
         # For texts
         for ee_text in self.input.texts:
@@ -528,11 +460,7 @@ class ExporterFootprintKicad:
                 pos_y=ee_text.center_y - self.input.bbox.y,
                 orientation=angle_to_ki(ee_text.rotation),
                 text=ee_text.text,
-                layers=(
-                    KI_LAYERS[ee_text.layer_id]
-                    if ee_text.layer_id in KI_LAYERS
-                    else "F.Fab"
-                ),
+                layers=_layer(ee_text.layer_id),
                 font_size=max(ee_text.font_size, 1),
                 thickness=max(ee_text.stroke_width, 0.01),
                 display=" hide" if ee_text.is_displayed is False else "",

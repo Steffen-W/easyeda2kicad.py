@@ -36,7 +36,7 @@ KI_LINE = (
     " (layer {layers}) (width {stroke_width:.2f}))\n"
 )
 KI_HOLE = (
-    '\t(pad "" thru_hole circle (at {pos_x:.2f} {pos_y:.2f}) (size {size:.2f}'
+    '\t(pad "" np_thru_hole circle (at {pos_x:.2f} {pos_y:.2f}) (size {size:.2f}'
     " {size:.2f}) (drill {size:.2f}) (layers *.Cu *.Mask))\n"
 )
 KI_VIA = (

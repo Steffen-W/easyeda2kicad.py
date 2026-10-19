@@ -5,7 +5,7 @@ import logging
 import math
 import re
 from pathlib import Path
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 # Local imports
 from .._version import GENERATOR_URL
@@ -24,11 +24,14 @@ from ..easyeda.parameters_easyeda import (
     EeSymbolText,
 )
 from ..easyeda.svg_path_parser import (
-    SvgPathEllipticalArc,
-    SvgPathMoveTo,
-    parse_svg_args,
-    split_svg_path,
-    svg_arc_geometry,
+    Point,
+    SvgArc,
+    SvgCubic,
+    SvgLine,
+    SvgSubpath,
+    is_zero_radius,
+    parse_svg_path,
+    parse_svg_points,
 )
 from .parameters_kicad_symbol import (
     KICAD_SYM_VERSIONS_SORTED,
@@ -43,6 +46,7 @@ from .parameters_kicad_symbol import (
     KiSymbolPolygon,
     KiSymbolRectangle,
     KiSymbolText,
+    overbar_active_low,
 )
 
 _SYM_LIB_REGEX = r'\n(\s*)\(symbol "{component_name}".*?\n\1\)(?=\n|$)'
@@ -168,16 +172,36 @@ def snap_bbox(
     return snapped_x, snapped_y
 
 
+def _ki_point(point: Point, ee_bbox: EeSymbolBbox) -> Point:
+    """EasyEDA symbol pixel point → KiCad mm, relative to the bbox, y up."""
+    return px_to_mm(point[0] - ee_bbox.x), -px_to_mm(point[1] - ee_bbox.y)
+
+
+def _pin_length(path: str) -> float:
+    """Length in px of the pin line drawn by the pin path (M x y h length)."""
+    try:
+        subpaths = parse_svg_path(path)
+    except ValueError as e:
+        logging.warning(f"Pin path {path!r}: {e}; using length 0")
+        return 0.0
+    if not subpaths or not subpaths[0].segments:
+        logging.warning(f"Pin path {path!r} draws no line; using length 0")
+        return 0.0
+    return math.dist(subpaths[0].start, subpaths[0].segments[-1].end)
+
+
 def convert_ee_pins(
     ee_pins: list[EeSymbolPin], ee_bbox: EeSymbolBbox
 ) -> list[KiSymbolPin]:
     kicad_pins = []
     for ee_pin in ee_pins:
-        pin_length = abs(int(float(ee_pin.pin_path.path.split("h")[-1].split()[0])))
+        pin_length = _pin_length(ee_pin.pin_path.path)
 
         ki_pin = KiSymbolPin(
-            name=ee_pin.name.text.replace(" ", ""),
-            number=ee_pin.settings.spice_pin_number.replace(" ", ""),
+            # KiCad pin names and numbers cannot contain spaces; the overbar
+            # needs them as word boundaries
+            name=overbar_active_low(ee_pin.name.text).replace(" ", "_"),
+            number=ee_pin.settings.spice_pin_number.replace(" ", "_"),
             style=KiPinStyle.line,
             length=px_to_mm_grid(pin_length),
             type=ee_pin_type_to_ki_pin_type[ee_pin.settings.type],
@@ -234,258 +258,203 @@ def convert_ee_circles(
 def convert_ee_ellipses(
     ee_ellipses: list[EeSymbolEllipse],
     ee_bbox: EeSymbolBbox,
-) -> list[KiSymbolCircle]:
-    # Ellipses are not supported in KiCad — convert only if radius_x == radius_y (circle)
-    return [
-        KiSymbolCircle(
-            pos_x=px_to_mm(ee_ellipse.center_x - ee_bbox.x),
-            pos_y=-px_to_mm(ee_ellipse.center_y - ee_bbox.y),
-            radius=px_to_mm(ee_ellipse.radius_x),
-        )
-        for ee_ellipse in ee_ellipses
-        if ee_ellipse.radius_x == ee_ellipse.radius_y
-    ]
-
-
-# EasyEDA stores full circles as arcs whose end lies just off the start; an end
-# closer than this share of the radius marks such a circle.
-_FULL_CIRCLE_ARC_GAP = 0.01
-
-
-def convert_ee_arcs(
-    ee_arcs: list[EeSymbolArc],
-    ee_bbox: EeSymbolBbox,
-) -> tuple[list[KiSymbolArc], list[KiSymbolCircle], list[KiSymbolPolygon]]:
-    """Convert EasyEDA arcs to KiCad arcs, nearly closed ones to circles and
-    ones with a zero radius to lines."""
-    kicad_arcs: list[KiSymbolArc] = []
-    kicad_circles: list[KiSymbolCircle] = []
-    kicad_lines: list[KiSymbolPolygon] = []
-    for ee_arc in ee_arcs:
-        if (
-            len(ee_arc.path) < 2
-            or not isinstance(ee_arc.path[0], SvgPathMoveTo)
-            or not isinstance(ee_arc.path[1], SvgPathEllipticalArc)
-        ):
-            logging.error("Can't convert this arc: unexpected SVG path structure")
+) -> KiSymbolShapes:
+    """Convert ellipses (E) to circles, or to polylines when not circular."""
+    shapes = KiSymbolShapes([], [], [], [])
+    for ee_ellipse in ee_ellipses:
+        center = (ee_ellipse.center_x, ee_ellipse.center_y)
+        rx, ry = ee_ellipse.radius_x, ee_ellipse.radius_y
+        if is_zero_radius(rx) or is_zero_radius(ry):
+            logging.warning(f"Skipping ellipse {ee_ellipse.id} with zero radius")
             continue
-        svg_arc = ee_arc.path[1]
-        rx, ry = svg_arc.radius_x, svg_arc.radius_y
-        svg_sx, svg_sy = ee_arc.path[0].start_x, ee_arc.path[0].start_y
-        svg_ex, svg_ey = svg_arc.end_x, svg_arc.end_y
-
-        # SVG draws an arc with a zero radius as a straight line
-        if rx == 0 or ry == 0:
-            kicad_lines.append(
-                KiSymbolPolygon(
-                    points=[
-                        [px_to_mm(svg_sx - ee_bbox.x), -px_to_mm(svg_sy - ee_bbox.y)],
-                        [px_to_mm(svg_ex - ee_bbox.x), -px_to_mm(svg_ey - ee_bbox.y)],
-                    ],
-                    points_number=2,
-                    is_closed=False,
-                )
-            )
-            continue
-
-        svg_mid_x, svg_mid_y = svg_arc_geometry(
-            sx=svg_sx,
-            sy=svg_sy,
-            ex=svg_ex,
-            ey=svg_ey,
-            rx=rx,
-            ry=ry,
-            x_rotation_deg=svg_arc.x_axis_rotation,
-            large_arc=svg_arc.flag_large_arc,
-            sweep=svg_arc.flag_sweep,
-        ).point(0.5)
-
-        is_full_circle = (
-            svg_arc.flag_large_arc
-            and math.isclose(rx, ry, rel_tol=1e-6)
-            and math.hypot(svg_ex - svg_sx, svg_ey - svg_sy)
-            <= _FULL_CIRCLE_ARC_GAP * rx
-        )
-        if is_full_circle:
-            # The mid point lies opposite the start, so the center is halfway.
-            kicad_circles.append(
+        if rx == ry:
+            pos_x, pos_y = _ki_point(center, ee_bbox)
+            shapes.circles.append(
                 KiSymbolCircle(
-                    pos_x=px_to_mm((svg_sx + svg_mid_x) / 2 - ee_bbox.x),
-                    pos_y=-px_to_mm((svg_sy + svg_mid_y) / 2 - ee_bbox.y),
-                    radius=px_to_mm(
-                        math.hypot(svg_mid_x - svg_sx, svg_mid_y - svg_sy) / 2
-                    ),
-                    background_filling=ee_arc.fill_color,
+                    pos_x=pos_x,
+                    pos_y=pos_y,
+                    radius=px_to_mm(rx),
+                    background_filling=ee_ellipse.fill_color,
                 )
             )
             continue
-
-        # Transform to KiCad coordinates (shift by bbox origin, flip Y-axis).
-        # Start and end are swapped: the Y-flip mirrors the arc, reversing the
-        # traversal direction, which would move the mid-point to the wrong side
-        # of the chord. Swapping start/end preserves the correct winding.
-        kicad_arcs.append(
-            KiSymbolArc(
-                start_x=px_to_mm(svg_ex - ee_bbox.x),
-                start_y=-px_to_mm(svg_ey - ee_bbox.y),
-                middle_x=px_to_mm(svg_mid_x - ee_bbox.x),
-                middle_y=-px_to_mm(svg_mid_y - ee_bbox.y),
-                end_x=px_to_mm(svg_sx - ee_bbox.x),
-                end_y=-px_to_mm(svg_sy - ee_bbox.y),
-                # angle_start != angle_end (default 0.0) disables background fill.
-                angle_start=1.0,
-                angle_end=0.0,
-            )
+        right, left = (center[0] + rx, center[1]), (center[0] - rx, center[1])
+        ellipse = SvgSubpath(
+            start=right,
+            segments=[
+                SvgArc(rx, ry, 0.0, False, True, left),
+                SvgArc(rx, ry, 0.0, False, True, right),
+            ],
+            closed=True,
         )
-
-    return kicad_arcs, kicad_circles, kicad_lines
+        _add_subpath(shapes, ellipse, ee_ellipse.fill_color, ee_bbox)
+    return shapes
 
 
 def convert_ee_polylines(
     ee_polylines: Sequence[EeSymbolPolyline | EeSymbolPolygon],
     ee_bbox: EeSymbolBbox,
 ) -> list[KiSymbolPolygon]:
+    """Convert polylines (PL) and polygons (PG); polygons and filled polylines
+    with more than two points are closed. Malformed point lists and ones with
+    fewer than two points are skipped with a warning."""
     kicad_polygons = []
     for ee_polyline in ee_polylines:
-        raw_pts = ee_polyline.points.split()
-        x_points = [
-            px_to_mm(float(raw_pts[i]) - ee_bbox.x) for i in range(0, len(raw_pts), 2)
-        ]
-        y_points = [
-            -px_to_mm(float(raw_pts[i]) - ee_bbox.y) for i in range(1, len(raw_pts), 2)
-        ]
-
-        if isinstance(ee_polyline, EeSymbolPolygon) or ee_polyline.fill_color:
-            x_points.append(x_points[0])
-            y_points.append(y_points[0])
-        if len(x_points) > 0 and len(y_points) > 0:
-            kicad_polygon = KiSymbolPolygon(
-                points=[
-                    [x_points[i], y_points[i]]
-                    for i in range(min(len(x_points), len(y_points)))
-                ],
-                points_number=min(len(x_points), len(y_points)),
-                is_closed=x_points[0] == x_points[-1] and y_points[0] == y_points[-1],
-            )
-            kicad_polygons.append(kicad_polygon)
-        else:
-            logging.warning("Skipping polygon with no parseable points")
-
+        try:
+            points = [
+                _ki_point(point, ee_bbox)
+                for point in parse_svg_points(ee_polyline.points)
+            ]
+        except ValueError as e:
+            logging.warning(f"Skipping polyline: {e}")
+            continue
+        if len(points) < 2:
+            logging.warning(f"Skipping polyline with {len(points)} point(s)")
+            continue
+        closes = isinstance(ee_polyline, EeSymbolPolygon) or ee_polyline.fill_color
+        if closes and len(points) > 2:
+            points.append(points[0])
+        kicad_polygons.append(_polygon(points, ee_polyline.fill_color))
     return kicad_polygons
 
 
-def convert_ee_polygons(
-    ee_polygons: list[EeSymbolPolygon],
+# EasyEDA stores full circles as arcs whose end lies just off the start; an end
+# closer than this share of the radius marks such a circle
+_FULL_CIRCLE_ARC_GAP = 0.01
+
+
+def _convert_arc(
+    start: Point,
+    center: Point,
+    sweep: float,
+    fill: bool,
     ee_bbox: EeSymbolBbox,
-) -> list[KiSymbolPolygon]:
-    return convert_ee_polylines(ee_polylines=ee_polygons, ee_bbox=ee_bbox)
+) -> KiSymbolArc | KiSymbolCircle:
+    """Convert a circular arc to a KiCad arc, or to a circle if nearly closed."""
+    radius = math.dist(center, start)
+    start_angle = math.atan2(start[1] - center[1], start[0] - center[0])
+
+    def point(angle: float) -> Point:
+        return _ki_point(
+            (
+                center[0] + radius * math.cos(start_angle + angle),
+                center[1] + radius * math.sin(start_angle + angle),
+            ),
+            ee_bbox,
+        )
+
+    # 2 |sin(sweep / 2)| is the distance between start and end per radius
+    if abs(sweep) > math.pi and 2 * abs(math.sin(sweep / 2)) <= _FULL_CIRCLE_ARC_GAP:
+        pos_x, pos_y = _ki_point(center, ee_bbox)
+        return KiSymbolCircle(
+            pos_x=pos_x, pos_y=pos_y, radius=px_to_mm(radius), background_filling=fill
+        )
+    # The y flip mirrors the arc and so reverses its direction; swapping start
+    # and end keeps the mid point on the correct side of the chord
+    (start_x, start_y), (mid_x, mid_y), (end_x, end_y) = (
+        point(sweep),
+        point(sweep / 2),
+        point(0.0),
+    )
+    return KiSymbolArc(
+        start_x=start_x,
+        start_y=start_y,
+        middle_x=mid_x,
+        middle_y=mid_y,
+        end_x=end_x,
+        end_y=end_y,
+        # angle_start != angle_end (default 0.0) disables background fill
+        angle_start=1.0,
+        angle_end=0.0,
+    )
+
+
+def _polygon(points: list[Point], fill: bool) -> KiSymbolPolygon:
+    """Polyline through the points, filled if it has a fill and is closed."""
+    return KiSymbolPolygon(points=points, filled=fill and points[0] == points[-1])
+
+
+class KiSymbolShapes(NamedTuple):
+    polygons: list[KiSymbolPolygon]
+    beziers: list[KiSymbolBezier]
+    arcs: list[KiSymbolArc]
+    circles: list[KiSymbolCircle]
+
+
+def _merge(*shapes: KiSymbolShapes) -> KiSymbolShapes:
+    return KiSymbolShapes(*(sum(lists, []) for lists in zip(*shapes)))
+
+
+def _add_subpath(
+    shapes: KiSymbolShapes, subpath: SvgSubpath, fill: bool, ee_bbox: EeSymbolBbox
+) -> None:
+    """Add a subpath as KiCad shapes.
+
+    KiCad fills single shapes only, so a filled closed subpath with curves or
+    arcs becomes one polyline along its flattened outline. Otherwise
+    consecutive lines become one polyline, cubic curves Béziers and circular
+    arcs arcs, or circles when nearly closed; other arcs join the polyline
+    flattened.
+    """
+    closed = bool(subpath.segments) and subpath.segments[-1].end == subpath.start
+    if fill and closed and not all(isinstance(s, SvgLine) for s in subpath.segments):
+        outline = [_ki_point(point, ee_bbox) for point in subpath.flatten()]
+        shapes.polygons.append(_polygon(outline, fill))
+        return
+
+    polyline = [_ki_point(subpath.start, ee_bbox)]
+    for start, segment in subpath.walk():
+        end = _ki_point(segment.end, ee_bbox)
+        circle = None
+        if isinstance(segment, SvgArc):
+            circle = segment.geometry(start).circle()
+        if not isinstance(segment, SvgCubic) and circle is None:
+            line = SvgSubpath(start, [segment]).flatten()[1:]
+            polyline += [_ki_point(point, ee_bbox) for point in line]
+            continue
+        if len(polyline) > 1:
+            shapes.polygons.append(_polygon(polyline, fill))
+        if isinstance(segment, SvgCubic):
+            shapes.beziers.append(
+                KiSymbolBezier(
+                    points=[
+                        _ki_point(start, ee_bbox),
+                        _ki_point(segment.control1, ee_bbox),
+                        _ki_point(segment.control2, ee_bbox),
+                        end,
+                    ]
+                )
+            )
+        elif circle is not None:
+            shape = _convert_arc(start, *circle, fill, ee_bbox)
+            if isinstance(shape, KiSymbolCircle):
+                shapes.circles.append(shape)
+            else:
+                shapes.arcs.append(shape)
+        polyline = [end]
+    if len(polyline) > 1:
+        shapes.polygons.append(_polygon(polyline, fill))
 
 
 def convert_ee_paths(
-    ee_paths: list[EeSymbolPath],
+    ee_paths: Sequence[EeSymbolPath | EeSymbolArc],
     ee_bbox: EeSymbolBbox,
-) -> tuple[list[KiSymbolPolygon], list[KiSymbolBezier]]:
-    """Convert EasyEDA PT path shapes to KiCad polygons and bezier curves.
-
-    M, L, Z → KiSymbolPolygon segments (straight lines).
-    C       → KiSymbolBezier with 4 control points [start, c1, c2, end].
-    Q       → KiSymbolBezier with 4 control points (elevated to cubic).
-
-    Mixed paths (L + C interspersed) are split: M/L segments become polygon
-    sub-paths and each C/Q becomes a separate KiSymbolBezier, all sharing
-    endpoints so the segments stay visually connected. Other and malformed
-    commands are skipped with a warning.
-
-    KiSymbolBezier requires KiCad format >= 20220914; for older versions
-    KiSymbolBezier.export() approximates the curve with a polyline.
-    """
-    polygons: list[KiSymbolPolygon] = []
-    beziers: list[KiSymbolBezier] = []
-
-    def _ki(ex: float, ey: float) -> list[float]:
-        return [px_to_mm(ex - ee_bbox.x), -px_to_mm(ey - ee_bbox.y)]
-
+) -> KiSymbolShapes:
+    """Convert path (PT) and arc (A) shapes to KiCad shapes (see _add_subpath).
+    Malformed paths are skipped with a warning."""
+    shapes = KiSymbolShapes([], [], [], [])
     for ee_path in ee_paths:
-        n_before = len(polygons) + len(beziers)
-
-        poly_pts: list[list[float]] = []  # current polygon sub-path (KiCad mm)
-        cur_x = 0.0  # current pen position in EE pixels
-        cur_y = 0.0
-        subpath_start: tuple[float, float] | None = None  # for Z close
-
-        def _flush_poly() -> None:
-            if len(poly_pts) >= 2:
-                closed = poly_pts[0] == poly_pts[-1]
-                polygons.append(
-                    KiSymbolPolygon(
-                        points=list(poly_pts),
-                        points_number=len(poly_pts),
-                        is_closed=closed,
-                    )
-                )
-            poly_pts.clear()
-
-        for cmd, text in split_svg_path(ee_path.paths):
-            try:
-                if cmd not in "MLCQZ":
-                    raise ValueError(f"path command '{cmd}' is not supported")
-                coordinate_sets = parse_svg_args(cmd, text)
-            except ValueError as e:
-                logging.warning(f"PT path: skipping command: {e}")
-                continue
-            if cmd == "Z" and poly_pts and subpath_start:
-                cur_x, cur_y = subpath_start
-                poly_pts.append(_ki(cur_x, cur_y))
-            for i, values in enumerate(coordinate_sets):
-                if cmd == "C":
-                    x1, y1, x2, y2, x, y = values
-                    _flush_poly()
-                    beziers.append(
-                        KiSymbolBezier(
-                            points=[
-                                _ki(cur_x, cur_y),
-                                _ki(x1, y1),
-                                _ki(x2, y2),
-                                _ki(x, y),
-                            ]
-                        )
-                    )
-                    cur_x, cur_y = x, y
-                    poly_pts.append(_ki(cur_x, cur_y))  # anchor for next segment
-                elif cmd == "Q":
-                    qx1, qy1, qx, qy = values
-                    # Degree elevation: quadratic → cubic
-                    cx1 = cur_x + 2 / 3 * (qx1 - cur_x)
-                    cy1 = cur_y + 2 / 3 * (qy1 - cur_y)
-                    cx2 = qx + 2 / 3 * (qx1 - qx)
-                    cy2 = qy + 2 / 3 * (qy1 - qy)
-                    _flush_poly()
-                    beziers.append(
-                        KiSymbolBezier(
-                            points=[
-                                _ki(cur_x, cur_y),
-                                _ki(cx1, cy1),
-                                _ki(cx2, cy2),
-                                _ki(qx, qy),
-                            ]
-                        )
-                    )
-                    cur_x, cur_y = qx, qy
-                    poly_pts.append(_ki(cur_x, cur_y))
-                else:
-                    cur_x, cur_y = values
-                    # Coordinate pairs after the first one of M are line-tos
-                    if cmd == "M" and i == 0:
-                        _flush_poly()
-                        subpath_start = (cur_x, cur_y)
-                    poly_pts.append(_ki(cur_x, cur_y))
-
-        _flush_poly()
-
-        if len(polygons) + len(beziers) == n_before:
-            logging.warning("PT path: skipping shape with no parseable points")
-
-    return polygons, beziers
+        try:
+            subpaths = parse_svg_path(ee_path.path)
+        except ValueError as e:
+            logging.warning(f"Skipping symbol path: {e}")
+            continue
+        if not any(subpath.segments for subpath in subpaths):
+            logging.warning(f"Skipping symbol path {ee_path.path!r} without segments")
+            continue
+        for subpath in subpaths:
+            _add_subpath(shapes, subpath, ee_path.fill_color, ee_bbox)
+    return shapes
 
 
 def convert_ee_texts(
@@ -527,39 +496,33 @@ def convert_to_kicad(
     snapped_x, snapped_y = snap_bbox(ee_symbol.bbox)
     snapped_bbox = EeSymbolBbox(x=snapped_x, y=snapped_y)
 
-    kicad_symbol = KiSymbol(
+    path_shapes = _merge(
+        convert_ee_paths(
+            ee_paths=[*ee_symbol.paths, *ee_symbol.arcs], ee_bbox=snapped_bbox
+        ),
+        convert_ee_ellipses(ee_ellipses=ee_symbol.ellipses, ee_bbox=snapped_bbox),
+    )
+    return KiSymbol(
         info=ki_info,
         pins=convert_ee_pins(ee_pins=ee_symbol.pins, ee_bbox=snapped_bbox),
         rectangles=convert_ee_rectangles(
             ee_rectangles=ee_symbol.rectangles, ee_bbox=snapped_bbox
         ),
-        circles=convert_ee_circles(ee_circles=ee_symbol.circles, ee_bbox=snapped_bbox),
+        circles=[
+            *convert_ee_circles(ee_circles=ee_symbol.circles, ee_bbox=snapped_bbox),
+            *path_shapes.circles,
+        ],
+        arcs=path_shapes.arcs,
+        polygons=[
+            *path_shapes.polygons,
+            *convert_ee_polylines(
+                ee_polylines=[*ee_symbol.polylines, *ee_symbol.polygons],
+                ee_bbox=snapped_bbox,
+            ),
+        ],
+        beziers=path_shapes.beziers,
+        texts=convert_ee_texts(ee_texts=ee_symbol.texts, ee_bbox=snapped_bbox),
     )
-    kicad_symbol.arcs, arc_circles, arc_lines = convert_ee_arcs(
-        ee_arcs=ee_symbol.arcs, ee_bbox=snapped_bbox
-    )
-    kicad_symbol.circles += arc_circles
-    kicad_symbol.circles += convert_ee_ellipses(
-        ee_ellipses=ee_symbol.ellipses, ee_bbox=snapped_bbox
-    )
-
-    path_polygons, path_beziers = convert_ee_paths(
-        ee_paths=ee_symbol.paths, ee_bbox=snapped_bbox
-    )
-    kicad_symbol.polygons = path_polygons + arc_lines
-    kicad_symbol.beziers = path_beziers
-    kicad_symbol.polygons += convert_ee_polylines(
-        ee_polylines=ee_symbol.polylines, ee_bbox=snapped_bbox
-    )
-    kicad_symbol.polygons += convert_ee_polygons(
-        ee_polygons=ee_symbol.polygons, ee_bbox=snapped_bbox
-    )
-
-    kicad_symbol.texts = convert_ee_texts(
-        ee_texts=ee_symbol.texts, ee_bbox=snapped_bbox
-    )
-
-    return kicad_symbol
 
 
 def tune_footprint_ref_path(ki_symbol: KiSymbol, footprint_lib_name: str) -> None:

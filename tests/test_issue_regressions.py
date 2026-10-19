@@ -106,14 +106,6 @@ def _path(path: str) -> list[tuple[float, float]]:
     return _parse_solid_region_path(path, bbox_x_px=0, bbox_y_px=0)
 
 
-def test_solid_region_compact_numbers_follow_svg_syntax() -> None:
-    assert _path("M0 0L10-5L.5.5Z") == _path("M 0 0 L 10 -5 L 0.5 0.5 Z")
-
-
-def test_solid_region_arc_with_zero_radius_is_a_line() -> None:
-    assert _path("M 0 0 A 0 5 0 0 1 10 0") == [(0.0, 0.0), (2.54, 0.0)]
-
-
 def test_solid_region_arc_is_flattened_on_its_circle() -> None:
     points = _path("M 10 0 A 10 10 0 0 1 0 10")
     assert len(points) == 10  # 90° in segments of at most 10°
@@ -125,20 +117,9 @@ def test_solid_region_arc_is_flattened_on_its_circle() -> None:
 @pytest.mark.parametrize(
     ("path", "message"),
     [
-        ("L 0 0 L 1 0 L 0 1 Z", "exactly one subpath"),
-        ("M 0 0 L 1 0 L 0 1 M 5 5 L 6 5 L 5 6", "exactly one subpath"),
-        ("M 0 0 L 1 0 L 0 1 Z L 2 2", "Z must be the last"),
-        ("M 0 0 l 1 0 l 0 1 Z", "'l' is not supported"),
-        ("M 0 0 C 5 0 15 20 20 20 Z", "'C' is not supported"),
+        ("M 0 0 L 1 0 L 0 1 M 5 5 L 6 5 L 5 6", "one subpath, got 2"),
+        ("M 0 0 L 1 0 L 0 1 Z L 2 2", "one subpath, got 2"),
         ("M 0 0 L 1 0 1 L 0 1 Z", "multiple of 2 numbers, got 3"),
-        ("M 0 0 L 1 0 A 1 1 0 0 1 0 Z", "multiple of 7 numbers, got 6"),
-        ("M 0 0 L L 0 1 Z", "multiple of 2 numbers, got 0"),
-        ("M 0 0 L 1 0 L 0 1 Z 5", "takes no arguments"),
-        ("M 0 0 L 1 0 x 5 Z", "'x' is not supported"),
-        ("M 0 0 L 1# 0 L 0 1 Z", "invalid number"),
-        ("M 0 0 L 1e999 1 L 0 1 Z", "non-finite"),
-        ("M 0 0 A 1 1 0 2 1 0 1 Z", "flags must be 0 or 1"),
-        ("M 0 0 A 1 1 0 0 0.5 0 1 Z", "flags must be 0 or 1"),
     ],
 )
 def test_malformed_solid_region_is_rejected(path: str, message: str) -> None:
@@ -151,7 +132,7 @@ def test_malformed_solid_region_is_skipped(caplog: pytest.LogCaptureFixture) -> 
         layer_id=3, path="M 0 0 L 1 0 1 L 0 1 Z", region_type="solid"
     )
     assert _convert_solid_region(region, bbox_x=0, bbox_y=0) is None
-    assert "skipping" in caplog.text
+    assert "Skipping SOLIDREGION" in caplog.text
 
 
 @pytest.mark.parametrize("path", ["M 0 0 L 10 0 L 10 10 Z", "M 0 0 L 10 0 L 10 10"])

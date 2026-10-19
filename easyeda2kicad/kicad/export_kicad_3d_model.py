@@ -61,13 +61,11 @@ def get_vertices(
         if len(parts) < 4 or parts[0] != "v":
             continue
         x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+        # VRML unit is 0.1 inch; adding 0.0 turns a rounded -0.0 into 0.0
         result.append(
             " ".join(
-                [
-                    str(round((x + offset_x) / 2.54, 4)),
-                    str(round((y + offset_y) / 2.54, 4)),
-                    str(round((z + offset_z) / 2.54, 4)),
-                ]
+                str(round(value / 2.54, 4) + 0.0)
+                for value in (x + offset_x, y + offset_y, z + offset_z)
             )
         )
     return result
@@ -107,10 +105,9 @@ def generate_wrl_model(model_3d: Ee3dModel) -> Ki3dModel:
 
     materials = get_materials(obj_data=model_3d.raw_obj)
 
-    # Step 1: Center XY on (0,0); shift Z so bottom sits at z=0 (always).
-    # Step 2: Apply EE metadata offset (c_origin - canvas_origin) in mm.
-    # translate(-bbox_cx, -bbox_cy, -z_min) then apply EE offset,
-    # applied unconditionally for both SMD and THT.
+    # Center the model on its origin with its bottom at z=0, the frame in which
+    # EasyEDA places it. The placement itself is the footprint's model offset,
+    # which KiCad applies after the model rotation.
     offset_x, offset_y, offset_z = 0.0, 0.0, 0.0
     bbox = _get_obj_bbox(model_3d.raw_obj)
     if bbox:
@@ -118,10 +115,6 @@ def generate_wrl_model(model_3d: Ee3dModel) -> Ki3dModel:
         offset_x = -(x_min + x_max) / 2.0
         offset_y = -(y_min + y_max) / 2.0
         offset_z = -z_min
-    # Add EE placement offset (already in mm, same unit as OBJ vertices)
-    offset_x += model_3d.translation.x
-    offset_y += model_3d.translation.y
-    offset_z += model_3d.translation.z
     logging.debug(
         f"3D centering offset: X={offset_x:.2f} Y={offset_y:.2f} Z={offset_z:.2f}"
     )
@@ -274,11 +267,8 @@ class Exporter3dModelKicad:
             wrl_path.write_text(self.output.raw_wrl, encoding="utf-8")
 
         if self.output_step:
-            # TODO: STEP is copied as-is without offset baking (unlike WRL).
-            # KiCad offset stays (0,0,0), so STEP is misplaced when
-            # model_3d.translation != (0,0,0) (i.e. c_origin != canvas_origin).
-            # Fix options: (a) write translation into .kicad_mod and remove WRL baking
-            # to avoid double-offset; (b) transform STEP geometry (needs opencascade).
+            # Copied unchanged: it lines up with the WRL model only if EasyEDA
+            # stores it centered with its bottom at z=0, which not all are
             step_path.write_bytes(self.output_step)
 
         return True

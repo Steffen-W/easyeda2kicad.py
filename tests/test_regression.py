@@ -32,6 +32,14 @@ TEST_COMPONENTS = [
     "C154551",
     "C2685",
     "C503582",
+    "C7421520",  # uPesy#211: symbol names with spaces
+    "C910846",  # uPesy#208: Bézier curve in a symbol path
+    "C5310972",  # uPesy#207: rotated symbol texts
+    "C221907",  # uPesy#209: nearly closed arcs (circles)
+    "C2651144",  # uPesy#206: SOLIDREGION paths
+    "C3646941",  # uPesy#213: NPTH cutouts on Edge.Cuts
+    "C3646937",  # uPesy#213
+    "C559120",  # uPesy#213
 ]
 
 
