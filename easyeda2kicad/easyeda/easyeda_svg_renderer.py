@@ -39,6 +39,21 @@ logger = logging.getLogger(__name__)
 _PADDING = 1  # minimal margin so strokes at the bbox edge are not clipped (= max stroke-width / 2)
 
 # EasyEDA layer IDs → display colours
+# Footprint layers from the bottom up as EasyEDA draws them in a top view,
+# with the translucent component body (99) underneath; other layers are drawn
+# last
+_LAYER_DRAW_ORDER = ("99", "4", "2", "1", "11", "3", "12")
+
+
+def _layer_rank(layer_id: str) -> int:
+    if layer_id in _LAYER_DRAW_ORDER:
+        return _LAYER_DRAW_ORDER.index(layer_id)
+    return len(_LAYER_DRAW_ORDER)
+
+
+# Color of drill holes in EasyEDA
+_HOLE_COLOR = "#222222"
+
 _LAYER_COLORS: dict[str, str] = {
     "1": "#FF0000",  # TopLayer
     "2": "#0000FF",  # BottomLayer
@@ -486,7 +501,17 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
     bbox = _BBox()
     _seed_bbox_from_api(data_str, bbox)
 
-    elements: list[str] = []
+    # Elements with their draw rank: EasyEDA draws by layer (_LAYER_DRAW_ORDER)
+    # and pads before the other shapes of their layer, not in data order
+    elements: list[tuple[tuple[int, int], str]] = []
+    # Pad numbers, drawn on top of everything
+    labels: list[str] = []
+
+    def draw(layer_id: str, svg: str) -> None:
+        elements.append(((_layer_rank(layer_id), 1), svg))
+
+    def draw_pad(layer_id: str, svg: str) -> None:
+        elements.append(((_layer_rank(layer_id), 0), svg))
 
     for shape in shapes:
         if not isinstance(shape, str):
@@ -504,9 +529,10 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
             bbox.add_pts(pts)
             layer_color = _LAYER_COLORS.get(parts[2], "#888888")
             pts_attr = " ".join(f"{x},{y}" for x, y in pts)
-            elements.append(
+            draw(
+                parts[2],
                 f'<polyline points="{pts_attr}" stroke="{layer_color}" '
-                f'stroke-width="{_stroke_w(parts[1])}" fill="none"/>'
+                f'stroke-width="{_stroke_w(parts[1])}" fill="none"/>',
             )
 
         elif designator == "PAD":
@@ -526,15 +552,15 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
             is_plated = _safe_bool(parts[15] if len(parts) > 15 else None, True)
             # Shapes in the frame of the unrotated pad
             pad_elements = []
-            if is_plated and pad_shape == "polygon":
+            if pad_shape == "polygon":
                 # Polygon points are absolute and already rotated
                 pts = _parse_points(parts[10]) if len(parts) > 10 else []
-                if pts:
-                    bbox.add_pts(pts)
+                bbox.add_pts(pts)
+                if is_plated and pts:
                     pts_attr = " ".join(f"{x},{y}" for x, y in pts)
-                    elements.append(
-                        f'<polygon points="{pts_attr}" '
-                        f'stroke="{layer_color}" stroke-width="0.5" fill="{layer_color}"/>'
+                    draw_pad(
+                        parts[6],
+                        f'<polygon points="{pts_attr}" fill="{layer_color}"/>',
                     )
             else:
                 bbox.add_pts(
@@ -544,21 +570,18 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
                         for dy in (-ph / 2, ph / 2)
                     ]
                 )
-            if is_plated and pad_shape != "polygon":
-                copper = (
-                    f'stroke="{layer_color}" stroke-width="0.5" fill="{layer_color}"'
-                )
-                if pad_shape == "ellipse":
+                if is_plated and pad_shape == "ellipse":
                     pad_elements.append(
                         f'<ellipse cx="{px}" cy="{py}" rx="{pw / 2}" ry="{ph / 2}" '
-                        f"{copper}/>"
+                        f'fill="{layer_color}"/>'
                     )
-                else:
+                elif is_plated:
                     # OVAL: rectangle with round ends
                     corner = min(pw, ph) / 2 if pad_shape == "oval" else 0
                     pad_elements.append(
                         f'<rect x="{px - pw / 2}" y="{py - ph / 2}" width="{pw}" '
-                        f'height="{ph}" rx="{corner}" ry="{corner}" {copper}/>'
+                        f'height="{ph}" rx="{corner}" ry="{corner}" '
+                        f'fill="{layer_color}"/>'
                     )
             # Drill hole; a slot runs along the longer pad side, as in the KiCad
             # export
@@ -568,18 +591,19 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
                 sx, sy = (length, 2 * hole_r) if along_x else (2 * hole_r, length)
                 pad_elements.append(
                     f'<rect x="{px - sx / 2}" y="{py - sy / 2}" width="{sx}" '
-                    f'height="{sy}" rx="{hole_r}" ry="{hole_r}" '
-                    f'stroke="#222222" stroke-width="0.3" fill="white"/>'
+                    f'height="{sy}" rx="{hole_r}" ry="{hole_r}" fill="{_HOLE_COLOR}"/>'
                 )
             if pad_elements:
                 transform = f' transform="rotate({rotation},{px},{py})"'
-                elements.append(
-                    f"<g{transform if rotation else ''}>{''.join(pad_elements)}</g>"
+                draw_pad(
+                    parts[6],
+                    f"<g{transform if rotation else ''}>{''.join(pad_elements)}</g>",
                 )
             if pad_number and is_plated:
-                elements.append(
-                    f'<text x="{px}" y="{py}" text-anchor="middle" dominant-baseline="central" '
-                    f'font-size="2" fill="white">{html.escape(pad_number)}</text>'
+                labels.append(
+                    f'<text x="{px}" y="{py}" text-anchor="middle" '
+                    f'dominant-baseline="central" font-size="{0.6 * min(pw, ph)}" '
+                    f'fill="white">{html.escape(pad_number)}</text>'
                 )
 
         elif designator == "CIRCLE":
@@ -587,14 +611,14 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
             if len(parts) < 4:
                 continue
             cx, cy, r = _f(parts[1]), _f(parts[2]), _f(parts[3])
-            layer_color = _LAYER_COLORS.get(
-                parts[5] if len(parts) > 5 else "", "#888888"
-            )
+            layer_id = parts[5] if len(parts) > 5 else ""
+            layer_color = _LAYER_COLORS.get(layer_id, "#888888")
             bbox.add(cx - r, cy - r)
             bbox.add(cx + r, cy + r)
-            elements.append(
+            draw(
+                layer_id,
                 f'<circle cx="{cx}" cy="{cy}" r="{r}" stroke="{layer_color}" '
-                f'stroke-width="{_stroke_w(parts[4] if len(parts) > 4 else "")}" fill="none"/>'
+                f'stroke-width="{_stroke_w(parts[4] if len(parts) > 4 else "")}" fill="none"/>',
             )
 
         elif designator == "ARC":
@@ -604,8 +628,9 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
             path_d = parts[4]
             layer_color = _LAYER_COLORS.get(parts[2], "#888888")
             _bbox_from_path(path_d, bbox)
-            elements.append(
-                f'<path d="{path_d}" stroke="{layer_color}" stroke-width="{_stroke_w(parts[1])}" fill="none"/>'
+            draw(
+                parts[2],
+                f'<path d="{path_d}" stroke="{layer_color}" stroke-width="{_stroke_w(parts[1])}" fill="none"/>',
             )
 
         elif designator == "RECT":
@@ -619,9 +644,10 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
             fill_color = _fill(parts[9] if len(parts) > 9 else "none")
             bbox.add(x, y)
             bbox.add(x + w, y + h)
-            elements.append(
+            draw(
+                parts[5],
                 f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
-                f'stroke="{layer_color}" stroke-width="{stroke_w}" fill="{fill_color}"/>'
+                f'stroke="{layer_color}" stroke-width="{stroke_w}" fill="{fill_color}"/>',
             )
 
         elif designator in ("TEXT", "SILK_LABEL"):
@@ -630,42 +656,33 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
                 continue
             x, y = _f(parts[2]), _f(parts[3])
             rotation = _f(parts[5])
-            layer_color = _LAYER_COLORS.get(
-                parts[7] if len(parts) > 7 else "", "#888888"
-            )
+            layer_id = parts[7]
+            layer_color = _LAYER_COLORS.get(layer_id, "#888888")
             try:
                 fs = float(parts[9].replace("pt", "")) if parts[9] else 5.0
             except ValueError:
                 fs = 5.0
             bbox.add(x, y)
             transform = f' transform="rotate({rotation},{x},{y})"' if rotation else ""
-            elements.append(
+            draw(
+                layer_id,
                 f'<text x="{x}" y="{y}" font-size="{fs}" fill="{layer_color}"{transform}>'
-                f"{html.escape(parts[10])}</text>"
+                f"{html.escape(parts[10])}</text>",
             )
 
         elif designator == "SOLIDREGION":
             # SOLIDREGION~layer_id~net~path~region_type~id~~[is_locked]
-            # region_type: "solid" (filled copper), "cutout" (void in copper),
-            #              "npth" (non-plated hole outline)
-            # Layers 100/101 (LeadShapeLayer/ComponentPolarityLayer) are skipped per spec.
+            # Filled without outline in the layer color whatever the region type,
+            # as by EasyEDA; layers 100/101 (LeadShapeLayer/ComponentPolarityLayer)
+            # are skipped
             if len(parts) < 4 or parts[1] in ("100", "101"):
                 continue
             path_d = parts[3]
-            region_type = parts[4] if len(parts) > 4 else "solid"
             layer_color = _LAYER_COLORS.get(parts[1], "#888888")
             _bbox_from_path(path_d, bbox)
-            if region_type == "cutout":
-                fill_attr = 'fill="none"'
-                stroke_color = layer_color
-            elif region_type == "npth":
-                fill_attr = 'fill="white"'
-                stroke_color = "#222222"
-            else:
-                fill_attr = f'fill="{layer_color}"'
-                stroke_color = layer_color
-            elements.append(
-                f'<path d="{path_d}" stroke="{stroke_color}" stroke-width="0.5" {fill_attr}/>'
+            draw(
+                parts[1],
+                f'<path d="{path_d}" fill="{layer_color}"/>',
             )
 
         elif designator == "HOLE":
@@ -675,36 +692,30 @@ def render_footprint_svg(api_result: dict[str, Any], bg_color: str = "black") ->
             hx, hy, r = _f(parts[1]), _f(parts[2]), _f(parts[3])
             bbox.add(hx - r, hy - r)
             bbox.add(hx + r, hy + r)
-            elements.append(
-                f'<circle cx="{hx}" cy="{hy}" r="{r}" stroke="#222222" '
-                f'stroke-width="0.5" fill="white"/>'
-            )
+            draw("11", f'<circle cx="{hx}" cy="{hy}" r="{r}" fill="{_HOLE_COLOR}"/>')
 
         elif designator == "VIA":
             # VIA~center_x~center_y~pad_diameter~net~drill_radius~id~is_locked
-            # [3] = pad diameter, [5] = drill radius (JS multiplies by 2 for drill diameter).
-            # VIAs span all copper layers → Multi-Layer color (11), not TopLayer (1).
+            # A via spans all copper layers and so is drawn on Multi-Layer (11)
             if len(parts) < 6:
                 continue
             vx, vy = _f(parts[1]), _f(parts[2])
-            pad_r = _f(parts[3]) / 2  # pad diameter → radius
-            drill_r = _f(parts[5])  # drill radius
-            layer_color = _LAYER_COLORS.get(
-                "11", "#C0C0C0"
-            )  # Multi-Layer: vias span all copper layers
+            pad_r = _f(parts[3]) / 2
+            drill_r = _f(parts[5])
+            layer_color = _LAYER_COLORS["11"]
             bbox.add(vx - pad_r, vy - pad_r)
             bbox.add(vx + pad_r, vy + pad_r)
-            elements.append(
-                f'<circle cx="{vx}" cy="{vy}" r="{pad_r}" '
-                f'stroke="{layer_color}" stroke-width="0.5" fill="{layer_color}"/>'
+            draw_pad(
+                "11",
+                f'<circle cx="{vx}" cy="{vy}" r="{pad_r}" fill="{layer_color}"/>',
             )
-            # Drill hole
-            elements.append(
-                f'<circle cx="{vx}" cy="{vy}" r="{drill_r}" '
-                f'stroke="white" stroke-width="0.3" fill="white"/>'
+            draw_pad(
+                "11",
+                f'<circle cx="{vx}" cy="{vy}" r="{drill_r}" fill="{_HOLE_COLOR}"/>',
             )
 
         elif designator != "SVGNODE":
             logger.debug("render_footprint_svg: unhandled shape type %r", designator)
 
-    return _build_svg(elements, bbox, title, bg_color=bg_color)
+    ordered = [svg for _, svg in sorted(elements, key=lambda element: element[0])]
+    return _build_svg(ordered + labels, bbox, title, bg_color=bg_color)

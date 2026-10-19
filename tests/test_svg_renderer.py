@@ -330,17 +330,24 @@ class TestSyntheticFootprintShapes:
         assert "<polygon " in svg
         assert "rotate(" not in svg
 
-    def test_solidregion_npth(self) -> None:
+    @pytest.mark.parametrize("region_type", ["solid", "npth", "cutout"])
+    def test_solidregion_is_filled_in_its_layer_color(self, region_type: str) -> None:
         svg = render_footprint_svg(
-            _fp_result(["SOLIDREGION~11~~M 0 0 L 10 0 L 10 10 Z~npth~gge1~"])
+            _fp_result([f"SOLIDREGION~11~~M 0 0 L 10 0 L 10 10 Z~{region_type}~gge1~"])
         )
-        assert 'fill="white"' in svg
+        assert '<path d="M 0 0 L 10 0 L 10 10 Z" fill="#C0C0C0"/>' in svg
 
-    def test_solidregion_cutout(self) -> None:
+    def test_holes_are_drawn_in_the_hole_color(self) -> None:
         svg = render_footprint_svg(
-            _fp_result(["SOLIDREGION~11~~M 0 0 L 10 0 L 10 10 Z~cutout~gge1~"])
+            _fp_result(
+                [
+                    "HOLE~10~10~1~gge1~0",
+                    "VIA~20~10~4~~1~gge2~0",
+                    "PAD~ELLIPSE~30~10~4~4~11~~1~1~~0~gge3~0~~Y~0",
+                ]
+            )
         )
-        assert 'fill="none"' in svg
+        assert svg.count('fill="#222222"') == 3
 
     def test_solidregion_layer100_skipped(self) -> None:
         svg = render_footprint_svg(
@@ -417,3 +424,43 @@ class TestPathExtent:
             _sym_result(["A~M 10 0 A 10 10 0 1 0 0 10~~#000000~1~0~none~a1~0"])
         )
         assert _viewbox(svg) == pytest.approx([-11, -11, 22, 22])
+
+
+class TestFootprintDrawOrder:
+    """Shapes are drawn by layer as in EasyEDA, pads first, not in data order."""
+
+    def test_layers_are_drawn_from_the_bottom_up(self) -> None:
+        svg = render_footprint_svg(
+            _fp_result(
+                [
+                    "SOLIDREGION~12~~M 0 0 L 2 0 L 2 2 Z~solid~doc~~~~0",
+                    "TRACK~1~3~~0 0 5 5~silk~0",
+                    "SOLIDREGION~11~~M 0 0 L 4 0 L 4 4 Z~npth~hole~~~~0",
+                    "TRACK~1~1~~0 0 5 0~copper~0",
+                    "PAD~RECT~0~0~2~2~1~~1~0~~0~pad~0~~Y~0",
+                ]
+            )
+        )
+        order = [
+            svg.index(marker)
+            for marker in (
+                '<g><rect x="-1.0"',  # pad on layer 1
+                '<polyline points="0.0,0.0 5.0,0.0"',  # track on layer 1
+                'd="M 0 0 L 4 0',  # npth region on layer 11
+                '<polyline points="0.0,0.0 5.0,5.0"',  # silkscreen, layer 3
+                'd="M 0 0 L 2 0',  # document, layer 12
+            )
+        ]
+        assert order == sorted(order)
+
+    def test_pad_numbers_are_drawn_last_and_scaled_to_the_pad(self) -> None:
+        svg = render_footprint_svg(
+            _fp_result(
+                [
+                    "PAD~RECT~0~0~2~1~1~~7~0~~0~pad~0~~Y~0",
+                    "SOLIDREGION~12~~M 0 0 L 2 0 L 2 2 Z~solid~doc~~~~0",
+                ]
+            )
+        )
+        assert svg.index('d="M 0 0 L 2 0') < svg.index(">7</text>")
+        assert 'font-size="0.6"' in svg
